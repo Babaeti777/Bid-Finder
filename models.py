@@ -162,6 +162,16 @@ class BidDatabase:
         sources TEXT DEFAULT '[]',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS email_sends (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        recipient_count INTEGER DEFAULT 0,
+        bid_count INTEGER DEFAULT 0,
+        bid_ids TEXT DEFAULT '[]',
+        errors TEXT DEFAULT '[]',
+        status TEXT DEFAULT 'sent'
+    );
     """
 
     def __init__(self, db_path: str = "oak_bids.db"):
@@ -293,6 +303,42 @@ class BidDatabase:
             INSERT INTO search_runs (sources_searched, total_found, new_opportunities, errors, duration_seconds)
             VALUES (?, ?, ?, ?, ?)
         """, [json.dumps(sources), total, new, json.dumps(errors), duration])
+        self.conn.commit()
+
+    def get_new_since_last_email(self, min_score: int = 0) -> list:
+        """Get opportunities created/updated since the last email was sent."""
+        last_send = self.conn.execute(
+            "SELECT MAX(sent_at) FROM email_sends WHERE status = 'sent'"
+        ).fetchone()[0]
+
+        conditions = ["relevance_score >= ?"]
+        params = [min_score]
+
+        if last_send:
+            conditions.append("(created_at > ? OR updated_at > ?)")
+            params.extend([last_send, last_send])
+
+        where = f"WHERE {' AND '.join(conditions)}"
+        rows = self.conn.execute(f"""
+            SELECT * FROM opportunities
+            {where}
+            ORDER BY relevance_score DESC
+        """, params).fetchall()
+
+        return [BidOpportunity.from_dict(dict(r)) for r in rows]
+
+    def log_email_send(self, recipient_count: int, bid_ids: list, errors: list = None):
+        """Record that an email digest was sent."""
+        self.conn.execute("""
+            INSERT INTO email_sends (recipient_count, bid_count, bid_ids, errors, status)
+            VALUES (?, ?, ?, ?, ?)
+        """, [
+            recipient_count,
+            len(bid_ids),
+            json.dumps(bid_ids),
+            json.dumps(errors or []),
+            "sent",
+        ])
         self.conn.commit()
 
     def close(self):

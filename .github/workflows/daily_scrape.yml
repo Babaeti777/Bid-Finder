@@ -1,0 +1,56 @@
+name: Daily Bid Scrape
+
+on:
+  schedule:
+    # 8 AM Eastern = 13:00 UTC (EST) / 12:00 UTC (EDT)
+    # Using 13:00 UTC to cover 8 AM EST year-round
+    - cron: '0 13 * * *'
+  workflow_dispatch: # Allow manual trigger from GitHub UI
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  scrape-and-notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download previous database
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          name: bid-database
+          path: .
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - name: Run bid finder (scrape + email + sheets)
+        env:
+          SAM_GOV_API_KEY: ${{ secrets.SAM_GOV_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
+        run: python main.py --cloud
+
+      - name: Upload database artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bid-database
+          path: oak_bids.db
+          retention-days: 90
+          overwrite: true

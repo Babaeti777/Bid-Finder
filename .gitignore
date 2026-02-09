@@ -1,0 +1,28 @@
+# Databases
+*.db
+*.sqlite3
+
+# Credentials & Settings
+settings.json
+credentials/
+service_account.json
+
+# Environment
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Exports
+oak_bids_*.csv
+oak_bids_*.json
+oak_bids_*.xlsx
+
+# IDE
+.vscode/
+.idea/
