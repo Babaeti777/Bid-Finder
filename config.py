@@ -159,7 +159,7 @@ LOCATIONS = {
 # DATA SOURCES
 # ============================================================
 SOURCES = {
-    # --- Public Bid Boards ---
+    # --- Public Bid Boards (Free) ---
     "sam_gov": {
         "name": "SAM.gov (Federal)",
         "base_url": "https://sam.gov/search/?index=opp",
@@ -167,6 +167,7 @@ SOURCES = {
         "api_key_env": "SAM_GOV_API_KEY",  # Set as env variable
         "enabled": True,
         "type": "government",
+        "cost": "free",
     },
     "eva": {
         "name": "eVA (Virginia)",
@@ -174,78 +175,119 @@ SOURCES = {
         "api_url": None,  # Web scraping required
         "enabled": True,
         "type": "government",
+        "cost": "free",
     },
     "arlington_county": {
         "name": "Arlington County Procurement",
         "base_url": "https://www.arlingtonva.us/Government/Programs/Purchasing",
         "enabled": True,
         "type": "government",
+        "cost": "free",
     },
     "fairfax_county": {
         "name": "Fairfax County Procurement",
         "base_url": "https://www.fairfaxcounty.gov/cregister/",
         "enabled": True,
         "type": "government",
+        "cost": "free",
     },
     "loudoun_county": {
         "name": "Loudoun County Procurement",
         "base_url": "https://www.loudoun.gov/bids",
         "enabled": True,
         "type": "government",
+        "cost": "free",
     },
     "prince_william": {
         "name": "Prince William County Procurement",
         "base_url": "https://www.pwcva.gov/department/finance/procurement-bids-and-proposals",
         "enabled": True,
         "type": "government",
+        "cost": "free",
     },
     "city_of_alexandria": {
         "name": "City of Alexandria Procurement",
         "base_url": "https://www.alexandriava.gov/Purchasing",
         "enabled": True,
         "type": "government",
+        "cost": "free",
     },
     "city_of_fairfax": {
         "name": "City of Fairfax Procurement",
         "base_url": "https://www.fairfaxva.gov/government/finance/procurement",
         "enabled": True,
         "type": "government",
+        "cost": "free",
     },
 
-    # --- Commercial / Private Sector ---
+    # --- Additional Free Government Sources ---
+    "dc_ocp": {
+        "name": "DC Office of Contracting and Procurement",
+        "base_url": "https://ocp.dc.gov/page/ocp-solicitations",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+    },
+    "emma_maryland": {
+        "name": "eMarylandMarketplace (eMMA)",
+        "base_url": "https://emma.maryland.gov/page/content-page/bids",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+    },
+    "bidnet_direct": {
+        "name": "BidNet Direct (Free Tier)",
+        "base_url": "https://www.bidnetdirect.com/virginia/solicitations",
+        "enabled": True,
+        "type": "commercial",
+        "cost": "free",
+    },
+
+    # --- Commercial / Private Sector (Paid) ---
     "dodge_construction": {
         "name": "Dodge Construction Network",
         "base_url": "https://www.construction.com",
-        "enabled": False,  # Requires paid subscription
+        "enabled": False,  # Requires paid subscription ~$400/mo
         "type": "commercial",
+        "cost": "paid",
     },
     "building_connected": {
         "name": "BuildingConnected",
         "base_url": "https://www.buildingconnected.com",
-        "enabled": False,  # Requires account
+        "enabled": False,  # Free basic, ~$150/mo pro
         "type": "commercial",
+        "cost": "paid",
     },
     "the_blue_book": {
         "name": "The Blue Book",
         "base_url": "https://www.thebluebook.com",
         "enabled": True,
         "type": "commercial",
+        "cost": "free",
     },
 
-    # --- Permit Data ---
+    # --- Permit Data (Free) ---
     "arlington_permits": {
         "name": "Arlington County Building Permits",
         "base_url": "https://building.arlingtonva.us/permits/",
         "enabled": True,
         "type": "permits",
+        "cost": "free",
     },
     "fairfax_permits": {
         "name": "Fairfax County Building Permits",
         "base_url": "https://www.fairfaxcounty.gov/landdevelopment/",
         "enabled": True,
         "type": "permits",
+        "cost": "free",
     },
 }
+
+# Paid sources not yet integrated - configure via settings page (http://localhost:5000):
+# - ConstructConnect (constructconnect.com) ~$300/mo
+# - iSqFt (isqft.com) ~$200/mo
+# - PlanHub (planhub.com) - free basic tier
+# - BidClerk (bidclerk.com) ~$250/mo
 
 # ============================================================
 # SCORING / RELEVANCE WEIGHTS
@@ -264,12 +306,24 @@ SCORING = {
 NOTIFICATIONS = {
     "email": {
         "enabled": False,
-        "recipients": [],     # Add email addresses
-        "smtp_server": "",
+        "smtp_server": "smtp.gmail.com",
         "smtp_port": 587,
+        "sender_email": "",       # Gmail address
+        "sender_password": "",    # Gmail App Password (not regular password)
+        "recipients": [],         # List of email addresses
     },
     "min_score_to_notify": 60,  # Only notify for high-relevance bids
     "digest_frequency": "daily",
+}
+
+# ============================================================
+# GOOGLE SHEETS SETTINGS
+# ============================================================
+GOOGLE_SHEETS = {
+    "enabled": False,
+    "spreadsheet_name": "OAK Builders - Bid Tracker",
+    "service_account_file": "service_account.json",
+    "worksheet_name": "Bids",
 }
 
 # ============================================================
@@ -282,3 +336,43 @@ OUTPUT = {
     "max_results_per_source": 50,
     "dedup_threshold": 0.85,  # Similarity threshold for dedup
 }
+
+
+# ============================================================
+# SETTINGS OVERRIDE (loads from settings.json if present)
+# ============================================================
+def load_settings_override():
+    """Load settings.json overrides if the file exists."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    settings_file = _Path(__file__).parent / "settings.json"
+    if not settings_file.exists():
+        return
+
+    with open(settings_file) as f:
+        s = _json.load(f)
+
+    if s.get("gmail_address"):
+        NOTIFICATIONS["email"]["sender_email"] = s["gmail_address"]
+        NOTIFICATIONS["email"]["sender_password"] = s.get("gmail_app_password", "")
+        NOTIFICATIONS["email"]["recipients"] = s.get("email_recipients", [])
+        NOTIFICATIONS["email"]["enabled"] = True
+
+    if s.get("google_sheets_enabled"):
+        GOOGLE_SHEETS["enabled"] = True
+        GOOGLE_SHEETS["spreadsheet_name"] = s.get(
+            "google_sheet_name", GOOGLE_SHEETS["spreadsheet_name"]
+        )
+
+    if s.get("sam_gov_api_key"):
+        import os
+        os.environ.setdefault("SAM_GOV_API_KEY", s["sam_gov_api_key"])
+
+    for key, creds in s.get("paid_sources", {}).items():
+        if key in SOURCES and creds.get("enabled"):
+            SOURCES[key]["enabled"] = True
+
+
+# Auto-load on import
+load_settings_override()

@@ -7,6 +7,9 @@ Usage:
     python main.py --source sam_gov # Run specific source
     python main.py --export csv     # Export results
     python main.py --stats          # Show dashboard stats
+    python main.py --email          # Scrape + send email digest
+    python main.py --sheets         # Scrape + update Google Sheet
+    python main.py --cloud          # Scrape + email + sheets (for GitHub Actions)
 """
 
 import argparse
@@ -20,6 +23,25 @@ from config import SOURCES, OUTPUT
 from models import BidDatabase, BidOpportunity
 from scrapers import get_scraper
 from scorer import score_opportunities
+
+
+def _run_scraper_with_retry(source_key, source_config, max_retries=3, backoff=5):
+    """Run a single scraper with retry logic. Returns (results, error_msg_or_None)."""
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            scraper = get_scraper(source_key, source_config)
+            results = scraper.scrape()
+            return results, None
+        except Exception as e:
+            last_error = str(e)
+            if attempt < max_retries:
+                wait = backoff * attempt
+                print(f"    Retry {attempt}/{max_retries - 1} in {wait}s...")
+                time.sleep(wait)
+
+    error_msg = f"{source_config['name']}: {last_error} (failed after {max_retries} attempts)"
+    return [], error_msg
 
 
 def run_scrapers(sources: list = None, db: BidDatabase = None) -> dict:
@@ -63,20 +85,16 @@ def run_scrapers(sources: list = None, db: BidDatabase = None) -> dict:
 
         print(f"\n[>] Scraping: {source_config['name']}...")
 
-        try:
-            scraper = get_scraper(source_key, source_config)
-            results = scraper.scrape()
-            print(f"    Found: {len(results)} opportunities")
+        results, error_msg = _run_scraper_with_retry(source_key, source_config)
+        print(f"    Found: {len(results)} opportunities")
+        all_results.extend(results)
+        summary["sources_searched"].append(source_key)
+        summary["by_source"][source_key] = len(results)
 
-            all_results.extend(results)
-            summary["sources_searched"].append(source_key)
-            summary["by_source"][source_key] = len(results)
-
-        except Exception as e:
-            error_msg = f"{source_config['name']}: {str(e)}"
+        if error_msg:
             errors.append(error_msg)
             summary["errors"].append(error_msg)
-            print(f"    ERROR: {e}")
+            print(f"    ERROR (after retries): {error_msg}")
 
     # Score all results
     print(f"\n[*] Scoring {len(all_results)} opportunities...")
@@ -217,6 +235,9 @@ def main():
     parser.add_argument("--stats", action="store_true", help="Show database stats")
     parser.add_argument("--min-score", type=int, default=0, help="Min score filter")
     parser.add_argument("--db", type=str, default=OUTPUT["database"], help="Database path")
+    parser.add_argument("--email", action="store_true", help="Send email digest after scraping")
+    parser.add_argument("--sheets", action="store_true", help="Update Google Sheet after scraping")
+    parser.add_argument("--cloud", action="store_true", help="Cloud mode: scrape + email + sheets")
 
     args = parser.parse_args()
     db = BidDatabase(args.db)
@@ -228,7 +249,24 @@ def main():
             export_results(db, fmt=args.export, min_score=args.min_score)
         else:
             sources = [args.source] if args.source else None
-            run_scrapers(sources=sources, db=db)
+            summary = run_scrapers(sources=sources, db=db)
+
+            if args.email or args.cloud:
+                from email_sender import EmailSender
+                print("\n[*] Sending email digest...")
+                sender = EmailSender(db)
+                sender.send_digest(scraper_errors=summary.get("errors", []))
+
+            if args.sheets or args.cloud:
+                from google_sheets import SheetsUpdater
+                print("\n[*] Updating Google Sheet...")
+                try:
+                    updater = SheetsUpdater(db)
+                    updater.append_new_bids()
+                except ImportError as e:
+                    print(f"[Sheets] Skipped: {e}")
+                except Exception as e:
+                    print(f"[Sheets] Error: {e}")
     finally:
         db.close()
 

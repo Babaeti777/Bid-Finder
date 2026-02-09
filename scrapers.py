@@ -452,6 +452,184 @@ class PermitScraper(BaseScraper):
 
 
 # ============================================================
+# DC OFFICE OF CONTRACTING AND PROCUREMENT
+# ============================================================
+
+class DCOCPScraper(BaseScraper):
+    """Scrapes DC Office of Contracting and Procurement solicitations."""
+
+    CONSTRUCTION_TERMS = [
+        "construction", "building", "renovation", "repair",
+        "maintenance", "facility", "contractor", "waterproof",
+        "roofing", "hvac", "plumbing", "electrical",
+    ]
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+        try:
+            resp = self.session.get(self.config["base_url"], timeout=30)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            listings = soup.select(
+                "table tbody tr, .view-content .views-row, .solicitation-item"
+            )
+            for listing in listings:
+                title_el = listing.select_one("a")
+                if not title_el:
+                    continue
+
+                title = self._clean_text(title_el.get_text())
+                link = urljoin(self.config["base_url"], title_el.get("href", ""))
+
+                if not any(term in title.lower() for term in self.CONSTRUCTION_TERMS):
+                    continue
+
+                ptype, kw_matches = self._match_keywords(title)
+
+                bid = BidOpportunity(
+                    title=title,
+                    source="dc_ocp",
+                    source_url=link,
+                    source_id=self._generate_source_id("dc_ocp", title),
+                    project_type=ptype,
+                    location_state="DC",
+                    agency_name="DC Office of Contracting and Procurement",
+                    keyword_matches=kw_matches,
+                    scraped_at=datetime.now().isoformat(),
+                )
+                results.append(bid)
+
+        except Exception as e:
+            print(f"[DC OCP] Error: {e}")
+
+        self.results = results
+        return results
+
+
+# ============================================================
+# eMARYLAND MARKETPLACE (eMMA)
+# ============================================================
+
+class EMMAMarylandScraper(BaseScraper):
+    """Scrapes eMarylandMarketplace for Maryland state procurement bids."""
+
+    CONSTRUCTION_TERMS = [
+        "construction", "building", "renovation", "repair",
+        "maintenance", "facility", "contractor", "waterproof",
+        "roofing", "hvac", "plumbing", "electrical",
+    ]
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+        try:
+            resp = self.session.get(self.config["base_url"], timeout=30)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            listings = soup.select(
+                "table tbody tr, .view-content .views-row, .bid-item"
+            )
+            for listing in listings:
+                title_el = listing.select_one("a")
+                if not title_el:
+                    continue
+
+                title = self._clean_text(title_el.get_text())
+                link = urljoin(self.config["base_url"], title_el.get("href", ""))
+
+                if not any(term in title.lower() for term in self.CONSTRUCTION_TERMS):
+                    continue
+
+                ptype, kw_matches = self._match_keywords(title)
+
+                date_el = listing.select_one("td:nth-child(3), .date, .deadline")
+                due_date = self._clean_text(date_el.get_text()) if date_el else ""
+
+                bid = BidOpportunity(
+                    title=title,
+                    source="emma_maryland",
+                    source_url=link,
+                    source_id=self._generate_source_id("emma_maryland", title),
+                    project_type=ptype,
+                    location_state="MD",
+                    agency_name="eMarylandMarketplace",
+                    due_date=due_date,
+                    keyword_matches=kw_matches,
+                    scraped_at=datetime.now().isoformat(),
+                )
+                results.append(bid)
+
+        except Exception as e:
+            print(f"[eMMA] Error: {e}")
+
+        self.results = results
+        return results
+
+
+# ============================================================
+# BIDNET DIRECT (Free Tier)
+# ============================================================
+
+class BidNetDirectScraper(BaseScraper):
+    """Scrapes BidNet Direct free Virginia solicitations."""
+
+    CONSTRUCTION_TERMS = [
+        "construction", "building", "renovation", "repair",
+        "maintenance", "facility", "contractor", "waterproof",
+        "roofing", "hvac", "plumbing", "electrical",
+    ]
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+        try:
+            resp = self.session.get(self.config["base_url"], timeout=30)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            listings = soup.select(
+                "table tbody tr, .search-result, .solicitation-row, .bid-item"
+            )
+            for listing in listings:
+                title_el = listing.select_one("a")
+                if not title_el:
+                    continue
+
+                title = self._clean_text(title_el.get_text())
+                link = urljoin(self.config["base_url"], title_el.get("href", ""))
+
+                if not any(term in title.lower() for term in self.CONSTRUCTION_TERMS):
+                    continue
+
+                ptype, kw_matches = self._match_keywords(title)
+                loc = self._match_location(title)
+
+                date_el = listing.select_one("td:nth-child(3), .date, .deadline")
+                due_date = self._clean_text(date_el.get_text()) if date_el else ""
+
+                bid = BidOpportunity(
+                    title=title,
+                    source="bidnet_direct",
+                    source_url=link,
+                    source_id=self._generate_source_id("bidnet_direct", title),
+                    project_type=ptype,
+                    location_city=loc.get("city", ""),
+                    location_county=loc.get("county", ""),
+                    location_state=loc.get("state", "VA"),
+                    due_date=due_date,
+                    keyword_matches=kw_matches,
+                    scraped_at=datetime.now().isoformat(),
+                )
+                results.append(bid)
+
+        except Exception as e:
+            print(f"[BidNet Direct] Error: {e}")
+
+        self.results = results
+        return results
+
+
+# ============================================================
 # SCRAPER FACTORY
 # ============================================================
 
@@ -468,6 +646,9 @@ def get_scraper(source_key: str, source_config: dict) -> BaseScraper:
         "city_of_fairfax": CountyProcurementScraper,
         "arlington_permits": PermitScraper,
         "fairfax_permits": PermitScraper,
+        "dc_ocp": DCOCPScraper,
+        "emma_maryland": EMMAMarylandScraper,
+        "bidnet_direct": BidNetDirectScraper,
     }
 
     scraper_class = scraper_map.get(source_key, CountyProcurementScraper)
