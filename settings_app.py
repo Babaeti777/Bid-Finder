@@ -20,12 +20,13 @@ app.secret_key = os.urandom(24)
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
 
 DEFAULT_SETTINGS = {
-    "gmail_address": "",
-    "gmail_app_password": "",
-    "email_recipients": [],
-    "google_sheets_enabled": False,
+    "gmail_address": "1oakbuilders@gmail.com",
+    "gmail_app_password": "Nikian$3879200",
+    "email_recipients": ["1oakbuilders@gmail.com],
+    "google_sheets_enabled": True,
     "google_sheet_name": "OAK Builders - Bid Tracker",
-    "sam_gov_api_key": "",
+    "sam_gov_api_key": "Z7kypWqNfdKCFFiltenbzqsZp0n1wNaJE7PGI2pv
+",
     "paid_sources": {
         "dodge_construction": {"enabled": False, "username": "", "password": ""},
         "building_connected": {"enabled": False, "username": "", "password": ""},
