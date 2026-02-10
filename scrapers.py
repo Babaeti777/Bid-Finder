@@ -21,7 +21,7 @@ except ImportError:
     raise
 
 from models import BidOpportunity
-from config import KEYWORDS, LOCATIONS, COMPANY
+from config import KEYWORDS, LOCATIONS, COMPANY, SCRAPER_FILTER_TERMS
 
 
 # ============================================================
@@ -218,9 +218,9 @@ class EVAScraper(BaseScraper):
         results = []
         search_terms = []
 
-        # Build search terms from our keyword lists
-        for category in ["waterproofing", "tenant_improvements", "general_contracting"]:
-            search_terms.extend(KEYWORDS[category][:5])  # Top 5 from each
+        # Build search terms from our keyword lists (all 4 categories)
+        for category in KEYWORDS:
+            search_terms.extend(KEYWORDS[category][:10])  # Top 10 from each
 
         for term in set(search_terms):
             try:
@@ -347,16 +347,15 @@ class CountyProcurementScraper(BaseScraper):
                 title = self._clean_text(title_el.get_text())
                 link = urljoin(self.config["base_url"], title_el.get("href", ""))
 
-                # Filter: only construction-related
+                # Filter: only construction-related (uses shared filter terms + top keywords)
                 combined = title.lower()
                 if not any(
                     kw in combined
                     for kwlist in KEYWORDS.values()
-                    for kw in kwlist[:3]
+                    for kw in kwlist[:8]
                 ) and not any(
                     term in combined
-                    for term in ["construction", "building", "renovation",
-                                 "repair", "maintenance", "facility", "contractor"]
+                    for term in SCRAPER_FILTER_TERMS
                 ):
                     continue
 
@@ -420,7 +419,11 @@ class PermitScraper(BaseScraper):
                     # Only interested in commercial permits
                     if not any(term in text.lower() for term in [
                         "commercial", "office", "retail", "industrial",
-                        "renovation", "alteration", "addition", "new construction"
+                        "renovation", "alteration", "addition", "new construction",
+                        "tenant", "buildout", "remodel", "restaurant",
+                        "medical", "dental", "mixed use", "multi-family",
+                        "parking", "warehouse", "institutional", "municipal",
+                        "church", "school", "hospital", "hotel",
                     ]):
                         continue
 
@@ -458,12 +461,6 @@ class PermitScraper(BaseScraper):
 class DCOCPScraper(BaseScraper):
     """Scrapes DC Office of Contracting and Procurement solicitations."""
 
-    CONSTRUCTION_TERMS = [
-        "construction", "building", "renovation", "repair",
-        "maintenance", "facility", "contractor", "waterproof",
-        "roofing", "hvac", "plumbing", "electrical",
-    ]
-
     def scrape(self) -> List[BidOpportunity]:
         results = []
         try:
@@ -482,7 +479,7 @@ class DCOCPScraper(BaseScraper):
                 title = self._clean_text(title_el.get_text())
                 link = urljoin(self.config["base_url"], title_el.get("href", ""))
 
-                if not any(term in title.lower() for term in self.CONSTRUCTION_TERMS):
+                if not any(term in title.lower() for term in SCRAPER_FILTER_TERMS):
                     continue
 
                 ptype, kw_matches = self._match_keywords(title)
@@ -514,12 +511,6 @@ class DCOCPScraper(BaseScraper):
 class EMMAMarylandScraper(BaseScraper):
     """Scrapes eMarylandMarketplace for Maryland state procurement bids."""
 
-    CONSTRUCTION_TERMS = [
-        "construction", "building", "renovation", "repair",
-        "maintenance", "facility", "contractor", "waterproof",
-        "roofing", "hvac", "plumbing", "electrical",
-    ]
-
     def scrape(self) -> List[BidOpportunity]:
         results = []
         try:
@@ -538,7 +529,7 @@ class EMMAMarylandScraper(BaseScraper):
                 title = self._clean_text(title_el.get_text())
                 link = urljoin(self.config["base_url"], title_el.get("href", ""))
 
-                if not any(term in title.lower() for term in self.CONSTRUCTION_TERMS):
+                if not any(term in title.lower() for term in SCRAPER_FILTER_TERMS):
                     continue
 
                 ptype, kw_matches = self._match_keywords(title)
@@ -574,12 +565,6 @@ class EMMAMarylandScraper(BaseScraper):
 class BidNetDirectScraper(BaseScraper):
     """Scrapes BidNet Direct free Virginia solicitations."""
 
-    CONSTRUCTION_TERMS = [
-        "construction", "building", "renovation", "repair",
-        "maintenance", "facility", "contractor", "waterproof",
-        "roofing", "hvac", "plumbing", "electrical",
-    ]
-
     def scrape(self) -> List[BidOpportunity]:
         results = []
         try:
@@ -598,7 +583,7 @@ class BidNetDirectScraper(BaseScraper):
                 title = self._clean_text(title_el.get_text())
                 link = urljoin(self.config["base_url"], title_el.get("href", ""))
 
-                if not any(term in title.lower() for term in self.CONSTRUCTION_TERMS):
+                if not any(term in title.lower() for term in SCRAPER_FILTER_TERMS):
                     continue
 
                 ptype, kw_matches = self._match_keywords(title)
