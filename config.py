@@ -31,6 +31,7 @@ COMPANY = {
 # ============================================================
 KEYWORDS = {
     "waterproofing": [
+        # Core waterproofing
         "waterproofing",
         "water intrusion",
         "water infiltration",
@@ -51,12 +52,40 @@ KEYWORDS = {
         "joint sealant",
         "elastomeric coating",
         "drainage system",
+        # Membrane & coatings
+        "membrane",
+        "cementitious coating",
+        "crystalline waterproofing",
+        "traffic coating",
+        "polyurethane coating",
+        "sheet membrane",
+        "liquid membrane",
+        "hot rubberized asphalt",
+        "bentonite",
+        # Injection & structural sealing
+        "epoxy injection",
+        "crack injection",
+        "expansion joint",
+        "control joint",
+        "vapor barrier",
+        "water management",
+        # Leak-related
+        "negative-side waterproofing",
+        "positive-side waterproofing",
+        "curtain wall repair",
+        "window leak",
+        "roof leak",
+        "below-slab drainage",
+        "hydrostatic pressure",
+        "wet basement",
     ],
     "tenant_improvements": [
+        # Core TI
         "tenant improvement",
         "tenant buildout",
         "tenant build-out",
         "TI project",
+        "TI buildout",
         "interior renovation",
         "office renovation",
         "office buildout",
@@ -69,8 +98,39 @@ KEYWORDS = {
         "office remodel",
         "suite renovation",
         "commercial upfit",
+        # Specific buildout types
+        "space buildout",
+        "workspace renovation",
+        "retail buildout",
+        "restaurant buildout",
+        "medical office buildout",
+        "dental office buildout",
+        "law office renovation",
+        "fit-up",
+        "upfit",
+        # Interior systems
+        "demising wall",
+        "drop ceiling",
+        "suspended ceiling",
+        "partition wall",
+        "commercial flooring",
+        "commercial painting",
+        "millwork",
+        "cabinetry",
+        "reception area",
+        "conference room renovation",
+        "break room",
+        "ADA restroom",
+        # MEP & specialty
+        "commercial plumbing",
+        "commercial electrical",
+        "data cabling",
+        "access flooring",
+        "storefront",
+        "signage",
     ],
     "general_contracting": [
+        # Core GC
         "general contractor",
         "general construction",
         "commercial construction",
@@ -84,13 +144,64 @@ KEYWORDS = {
         "roof repair",
         "concrete repair",
         "façade repair",
+        "facade repair",
         "door replacement",
         "flooring replacement",
         "painting contractor",
         "demolition",
         "site work",
+        # Structural & exterior
+        "commercial remodel",
+        "building maintenance",
+        "structural repair",
+        "masonry repair",
+        "brick repair",
+        "stucco repair",
+        "exterior renovation",
+        "window replacement",
+        "curtain wall",
+        "storefront replacement",
+        "canopy",
+        "awning",
+        "loading dock",
+        "parking garage repair",
+        "elevator modernization",
+        # Demolition & abatement
+        "interior demolition",
+        "selective demolition",
+        "abatement",
+        "hazmat",
+        "asbestos",
+        "lead paint",
+        # Damage & emergency
+        "fire damage",
+        "water damage",
+        "storm damage",
+        "emergency repair",
+        # Maintenance & capital
+        "preventive maintenance",
+        "capital improvement",
+        "deferred maintenance",
+        # Roofing
+        "commercial roofing",
+        "TPO",
+        "EPDM",
+        "standing seam",
+        "roof replacement",
+        # Delivery methods
+        "turnkey",
+        "design-build",
+        "CM at risk",
+        "construction management",
+        # Specialty
+        "metal building",
+        "pre-engineered building",
+        "sitework",
+        "grading",
+        "paving",
     ],
     "government": [
+        # Contract vehicles
         "IDIQ",
         "task order",
         "design build",
@@ -105,8 +216,61 @@ KEYWORDS = {
         "government facility",
         "federal building",
         "military construction",
+        # Additional contract types
+        "BPA",
+        "blanket purchase agreement",
+        "GSA schedule",
+        "indefinite delivery",
+        "indefinite quantity",
+        "requirements contract",
+        # Operations & maintenance
+        "base operations",
+        "O&M",
+        "operations and maintenance",
+        "construction services",
+        "minor construction",
+        "repair and alteration",
+        # Military & federal
+        "sustainment restoration modernization",
+        "SRM",
+        "MILCON",
+        "MATOC",
+        "SATOC",
+        "MACC",
+        "military base",
+        "VA hospital",
+        "federal courthouse",
+        "post office",
+        "government housing",
+        "GSA building",
+        "guard station",
+        "barracks",
     ],
 }
+
+# ============================================================
+# SCRAPER FILTER TERMS (shared across all scrapers)
+# ============================================================
+# Broad terms used by scrapers to pre-filter listings before
+# keyword scoring. Expanding this list widens the net for ALL scrapers.
+SCRAPER_FILTER_TERMS = [
+    "construction", "building", "renovation", "repair", "maintenance",
+    "facility", "contractor", "waterproof", "roofing", "hvac",
+    "plumbing", "electrical", "demolition", "painting", "flooring",
+    "concrete", "masonry", "carpentry", "drywall", "ceiling",
+    "mechanical", "fire protection", "elevator", "sitework",
+    "grading", "paving", "landscaping", "fencing", "ADA",
+    "abatement", "remediation", "restoration", "remodel",
+    "tenant", "buildout", "fit-out", "improvement",
+    "general contractor", "subcontractor", "architect",
+    "engineering", "structural", "exterior", "interior",
+    "commercial", "industrial", "institutional", "municipal",
+    "courthouse", "hospital", "school", "university",
+    "office", "retail", "warehouse", "parking",
+    "stormwater", "utilities", "sewer", "water main",
+    "door", "window", "roof", "facade", "envelope",
+    "modernization", "upgrade", "replacement", "installation",
+]
 
 # ============================================================
 # GEOGRAPHIC FILTERS (NOVA Focus)
