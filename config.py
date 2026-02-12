@@ -327,7 +327,7 @@ SOURCES = {
     "sam_gov": {
         "name": "SAM.gov (Federal)",
         "base_url": "https://sam.gov/search/?index=opp",
-        "api_url": "https://api.sam.gov/opportunities/v2/search",
+        "api_url": "https://api.sam.gov/prod/opportunities/v2/search",
         "api_key_env": "SAM_GOV_API_KEY",  # Set as env variable
         "enabled": True,
         "type": "government",
@@ -335,50 +335,50 @@ SOURCES = {
     },
     "eva": {
         "name": "eVA (Virginia)",
-        "base_url": "https://eva.virginia.gov",
-        "api_url": None,  # Web scraping required
+        "base_url": "https://mvendor.cgieva.com/Vendor/public/AllOpportunities.jsp",
+        "api_url": None,
         "enabled": True,
         "type": "government",
         "cost": "free",
     },
     "arlington_county": {
         "name": "Arlington County Procurement",
-        "base_url": "https://www.arlingtonva.us/Government/Programs/Purchasing",
+        "base_url": "https://vrapp.vendorregistry.com/Bids/View/BidsList?BuyerId=a596c7c4-0123-4202-bf15-3583300ee088",
         "enabled": True,
         "type": "government",
         "cost": "free",
     },
     "fairfax_county": {
         "name": "Fairfax County Procurement",
-        "base_url": "https://www.fairfaxcounty.gov/cregister/",
-        "enabled": True,
+        "base_url": "https://fairfaxcounty.bonfirehub.com/portal/?tab=openOpportunities",
+        "enabled": False,  # Bonfire SPA - requires JavaScript rendering (Selenium)
         "type": "government",
         "cost": "free",
     },
     "loudoun_county": {
         "name": "Loudoun County Procurement",
-        "base_url": "https://www.loudoun.gov/bids",
+        "base_url": "https://www.loudoun.gov/Bids.aspx",
         "enabled": True,
         "type": "government",
         "cost": "free",
     },
     "prince_william": {
         "name": "Prince William County Procurement",
-        "base_url": "https://www.pwcva.gov/department/finance/procurement-bids-and-proposals",
+        "base_url": "https://eservice2.pwcgov.org/eservices/procurement/",
         "enabled": True,
         "type": "government",
         "cost": "free",
     },
     "city_of_alexandria": {
         "name": "City of Alexandria Procurement",
-        "base_url": "https://www.alexandriava.gov/Purchasing",
+        "base_url": "https://www.alexandriava.gov/purchasing/current-solicitations",
         "enabled": True,
         "type": "government",
         "cost": "free",
     },
     "city_of_fairfax": {
         "name": "City of Fairfax Procurement",
-        "base_url": "https://www.fairfaxva.gov/government/finance/procurement",
+        "base_url": "https://www.fairfaxva.gov/government/finance/procurement/current-solicitations",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -387,22 +387,23 @@ SOURCES = {
     # --- Additional Free Government Sources ---
     "dc_ocp": {
         "name": "DC Office of Contracting and Procurement",
-        "base_url": "https://ocp.dc.gov/page/ocp-solicitations",
+        "base_url": "https://contracts.ocp.dc.gov/solicitations/search",
+        "api_url": "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Government_Operations/MapServer/19/query",
         "enabled": True,
         "type": "government",
         "cost": "free",
     },
     "emma_maryland": {
         "name": "eMarylandMarketplace (eMMA)",
-        "base_url": "https://emma.maryland.gov/page/content-page/bids",
-        "enabled": True,
+        "base_url": "https://emma.maryland.gov/page.aspx/en/rfp/request_browse_public",
+        "enabled": False,  # Ivalua SPA - requires JavaScript rendering (Selenium)
         "type": "government",
         "cost": "free",
     },
     "bidnet_direct": {
         "name": "BidNet Direct (Free Tier)",
-        "base_url": "https://www.bidnetdirect.com/virginia/solicitations",
-        "enabled": True,
+        "base_url": "https://www.bidnetdirect.com/virginia",
+        "enabled": False,  # SOVRA SPA - requires JavaScript rendering (Selenium)
         "type": "commercial",
         "cost": "free",
     },
@@ -425,7 +426,7 @@ SOURCES = {
     "the_blue_book": {
         "name": "The Blue Book",
         "base_url": "https://www.thebluebook.com",
-        "enabled": True,
+        "enabled": False,  # Requires JS rendering
         "type": "commercial",
         "cost": "free",
     },
@@ -433,21 +434,21 @@ SOURCES = {
     # --- Permit Data (Free) ---
     "arlington_permits": {
         "name": "Arlington County Building Permits",
-        "base_url": "https://building.arlingtonva.us/permits/",
-        "enabled": True,
+        "base_url": "https://permits.arlingtonva.us/",
+        "enabled": False,  # Permit portal requires JavaScript rendering
         "type": "permits",
         "cost": "free",
     },
     "fairfax_permits": {
         "name": "Fairfax County Building Permits",
-        "base_url": "https://www.fairfaxcounty.gov/landdevelopment/",
-        "enabled": True,
+        "base_url": "https://www.fairfaxcounty.gov/landdevelopment/building-permits",
+        "enabled": False,  # Info page, not live permit data
         "type": "permits",
         "cost": "free",
     },
 }
 
-# Paid sources not yet integrated - configure via settings page (http://localhost:5000):
+# Paid sources not yet integrated - configure via Settings in dashboard (http://localhost:8080):
 # - ConstructConnect (constructconnect.com) ~$300/mo
 # - iSqFt (isqft.com) ~$200/mo
 # - PlanHub (planhub.com) - free basic tier
