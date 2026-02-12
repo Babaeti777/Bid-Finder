@@ -352,7 +352,7 @@ class CountyProcurementScraper(BaseScraper):
                 if not any(
                     kw in combined
                     for kwlist in KEYWORDS.values()
-                    for kw in kwlist[:8]
+                    for kw in kwlist[:15]
                 ) and not any(
                     term in combined
                     for term in SCRAPER_FILTER_TERMS
