@@ -140,6 +140,17 @@ class BaseScraper(ABC):
 
         return result
 
+    def _is_valid_href(self, href):
+        """Check if an href is a real page link (not anchor/javascript)."""
+        if not href:
+            return False
+        href = href.strip()
+        if href in ("#", "/", ""):
+            return False
+        if href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            return False
+        return True
+
     def _find_links_broad(self, soup):
         """Try multiple strategies to find bid listing links."""
         results = []
@@ -148,7 +159,7 @@ class BaseScraper(ABC):
         for table in soup.select("table"):
             for row in table.select("tr"):
                 link = row.select_one("a[href]")
-                if link and link.get_text(strip=True):
+                if link and link.get_text(strip=True) and self._is_valid_href(link.get("href", "")):
                     cells = row.select("td")
                     cell_texts = [c.get_text(strip=True) for c in cells]
                     results.append({
@@ -161,7 +172,7 @@ class BaseScraper(ABC):
         if not results:
             for li in soup.select("li"):
                 link = li.select_one("a[href]")
-                if link and link.get_text(strip=True):
+                if link and link.get_text(strip=True) and self._is_valid_href(link.get("href", "")):
                     results.append({
                         "title": link.get_text(strip=True),
                         "href": link.get("href", ""),
@@ -172,7 +183,7 @@ class BaseScraper(ABC):
         if not results:
             for div in soup.select("div.row, div.item, div.listing, div.card, article"):
                 link = div.select_one("a[href]")
-                if link and link.get_text(strip=True):
+                if link and link.get_text(strip=True) and self._is_valid_href(link.get("href", "")):
                     results.append({
                         "title": link.get_text(strip=True),
                         "href": link.get("href", ""),
@@ -183,10 +194,11 @@ class BaseScraper(ABC):
         if not results:
             for link in soup.select("a[href]"):
                 text = link.get_text(strip=True)
-                if text and len(text) > 10:  # Skip nav links
+                href = link.get("href", "")
+                if text and len(text) > 10 and self._is_valid_href(href):
                     results.append({
                         "title": text,
-                        "href": link.get("href", ""),
+                        "href": href,
                         "extra_text": text,
                     })
 
@@ -378,10 +390,17 @@ class DCOCPScraper(BaseScraper):
 
                 ptype, kw_matches = self._match_keywords(combined)
 
-                # Build source URL
-                source_url = f"https://contracts.ocp.dc.gov/solicitations/search"
+                # Build source URL - use search with solicitation number
                 if sol_number:
-                    source_url = f"https://contracts.ocp.dc.gov/solicitations/{sol_number}"
+                    source_url = (
+                        f"https://contracts.ocp.dc.gov/solicitations/search"
+                        f"?keyword={quote(sol_number)}"
+                    )
+                else:
+                    source_url = (
+                        f"https://contracts.ocp.dc.gov/solicitations/search"
+                        f"?keyword={quote(title[:50])}"
+                    )
 
                 bid = BidOpportunity(
                     title=title,
