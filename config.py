@@ -516,7 +516,7 @@ SOURCES = {
     },
     "city_of_manassas": {
         "name": "City of Manassas Procurement",
-        "base_url": "https://www.manassasva.gov/purchasing/bid_postings.php",
+        "base_url": "https://www.demandstar.com/app/agencies/virginia/city-of-manassas/procurement-opportunities/19f69d32-2937-4f84-bcf3-aec285941c4c/",
         "enabled": True,
         "type": "government",
         "cost": "free",
