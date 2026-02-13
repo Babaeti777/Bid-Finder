@@ -221,10 +221,14 @@ def api_bids():
                 value = f"${b.estimated_value_min:,.0f} - ${b.estimated_value_max:,.0f}"
             else:
                 value = ""
+            # Friendly source name from config
+            source_info = SOURCES.get(b.source, {})
+            source_name = source_info.get("name", b.source.replace("_", " ").title())
             results.append({
                 "id": getattr(b, "id", 0),
                 "title": b.title,
                 "source": b.source,
+                "source_name": source_name,
                 "source_url": b.source_url,
                 "project_type": b.project_type or "other",
                 "location": location,
@@ -236,7 +240,10 @@ def api_bids():
                 "set_aside": b.set_aside or "",
                 "contact_name": b.contact_name,
                 "contact_email": b.contact_email,
-                "description": (b.description or "")[:200],
+                "description": (b.description or "")[:300],
+                "keywords": b.keyword_matches[:8] if b.keyword_matches else [],
+                "solicitation_type": b.solicitation_type or "",
+                "posted_date": b.posted_date or "",
             })
         return jsonify(results)
     finally:
@@ -428,18 +435,30 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;color:#333;min-h
 .cat-header .count{background:#1a472a;color:#fff;padding:2px 10px;border-radius:12px;font-size:13px;font-weight:600}
 
 /* BID CARDS */
-.bid-card{background:#fff;border-radius:8px;padding:16px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,.05);border-left:4px solid #ccc;display:grid;grid-template-columns:1fr auto;gap:12px;transition:.15s}
-.bid-card:hover{box-shadow:0 3px 12px rgba(0,0,0,.1);transform:translateY(-1px)}
+.bid-card{background:#fff;border-radius:10px;padding:18px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.06);border-left:5px solid #ccc;transition:.15s}
+.bid-card:hover{box-shadow:0 4px 16px rgba(0,0,0,.12);transform:translateY(-1px)}
 .bid-card.score-high{border-left-color:#28a745}
 .bid-card.score-mid{border-left-color:#ffc107}
 .bid-card.score-low{border-left-color:#dc3545}
-.bid-title{font-weight:600;font-size:15px;margin-bottom:6px}
-.bid-title a{color:#1a472a;text-decoration:none}
-.bid-title a:hover{text-decoration:underline}
-.bid-meta{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:#666}
-.bid-meta span{display:flex;align-items:center;gap:4px}
-.bid-right{display:flex;flex-direction:column;align-items:flex-end;gap:8px;min-width:100px}
-.score-badge{padding:4px 14px;border-radius:14px;font-weight:700;font-size:15px;color:#fff}
+.bid-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px}
+.bid-title{font-weight:700;font-size:16px;line-height:1.3;flex:1}
+.bid-title a{color:#1a472a;text-decoration:none;display:inline}
+.bid-title a:hover{text-decoration:underline;color:#245a36}
+.bid-source-tag{display:inline-block;background:#e8f5e9;color:#2e7d32;font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;margin-left:8px;white-space:nowrap;vertical-align:middle}
+.bid-info{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px 16px;margin-bottom:10px;font-size:13px;color:#555}
+.bid-info-item{display:flex;flex-direction:column}
+.bid-info-label{font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.5px;margin-bottom:1px}
+.bid-info-value{font-weight:500;color:#333}
+.bid-desc{font-size:13px;color:#666;line-height:1.4;margin-bottom:10px;padding:8px 10px;background:#fafafa;border-radius:6px}
+.bid-keywords{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px}
+.bid-kw{background:#f0f0f0;color:#555;font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap}
+.bid-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;padding-top:10px;border-top:1px solid #f0f0f0}
+.bid-actions-left{display:flex;align-items:center;gap:8px}
+.bid-actions-right{display:flex;align-items:center;gap:10px}
+.btn-view{display:inline-flex;align-items:center;gap:6px;background:#1a472a;color:#fff;padding:7px 16px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;transition:.15s}
+.btn-view:hover{background:#245a36}
+.btn-view svg{width:14px;height:14px;fill:currentColor}
+.score-badge{padding:4px 14px;border-radius:14px;font-weight:700;font-size:14px;color:#fff;white-space:nowrap}
 .score-badge.high{background:#28a745}
 .score-badge.mid{background:#ffc107;color:#333}
 .score-badge.low{background:#dc3545}
@@ -462,13 +481,14 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;color:#333;min-h
   .navbar{padding:0 12px}
   .main{padding:12px}
   .stats-row{grid-template-columns:repeat(2,1fr)}
-  .bid-card{grid-template-columns:1fr;gap:8px}
-  .bid-right{flex-direction:row;align-items:center}
+  .bid-info{grid-template-columns:1fr 1fr}
+  .bid-actions{flex-direction:column;align-items:stretch}
+  .bid-actions-left,.bid-actions-right{justify-content:space-between}
   .toolbar input[type=text]{min-width:120px}
 }
 @media(max-width:480px){
   .stats-row{grid-template-columns:1fr 1fr}
-  .bid-meta{flex-direction:column;gap:4px}
+  .bid-title{font-size:14px}
 }
 </style>
 </head>
@@ -730,21 +750,67 @@ function renderCard(b) {
     `<option value="${s}" ${s===b.status?'selected':''}>${s.replace('_',' ')}</option>`
   ).join('');
 
+  // Keyword tags
+  let kwHtml = '';
+  if (b.keywords && b.keywords.length) {
+    kwHtml = '<div class="bid-keywords">' +
+      b.keywords.map(k => `<span class="bid-kw">${escHtml(k)}</span>`).join('') +
+      '</div>';
+  }
+
+  // Solicitation type badge
+  const solType = b.solicitation_type ? `<span class="bid-source-tag">${escHtml(b.solicitation_type)}</span>` : '';
+
   return `<div class="bid-card ${cardClass}">
-    <div>
-      <div class="bid-title"><a href="${b.source_url}" target="_blank">${escHtml(b.title)}</a></div>
-      <div class="bid-meta">
-        <span><strong>Source:</strong> ${escHtml(b.source)}</span>
-        <span><strong>Location:</strong> ${escHtml(b.location || 'N/A')}</span>
-        <span><strong>Value:</strong> ${escHtml(b.value || 'N/A')}</span>
-        <span><strong>Due:</strong> ${escHtml(b.due_date || 'N/A')}</span>
-        ${b.set_aside ? '<span><strong>Set-Aside:</strong> '+escHtml(b.set_aside)+'</span>' : ''}
+    <div class="bid-top">
+      <div class="bid-title">
+        <a href="${b.source_url}" target="_blank" rel="noopener">${escHtml(b.title)}</a>
+        ${solType}
       </div>
-      ${b.description ? '<div style="margin-top:6px;font-size:12px;color:#888">'+escHtml(b.description)+'</div>' : ''}
-    </div>
-    <div class="bid-right">
       <span class="score-badge ${scoreClass}">${b.score}</span>
-      <select class="status-select" onchange="updateStatus(${b.id}, this.value)">${statusOpts}</select>
+    </div>
+
+    <div class="bid-info">
+      <div class="bid-info-item">
+        <span class="bid-info-label">Source</span>
+        <span class="bid-info-value">${escHtml(b.source_name || b.source)}</span>
+      </div>
+      <div class="bid-info-item">
+        <span class="bid-info-label">Location</span>
+        <span class="bid-info-value">${escHtml(b.location || 'N/A')}</span>
+      </div>
+      ${b.agency ? `<div class="bid-info-item">
+        <span class="bid-info-label">Agency</span>
+        <span class="bid-info-value">${escHtml(b.agency)}</span>
+      </div>` : ''}
+      ${b.due_date ? `<div class="bid-info-item">
+        <span class="bid-info-label">Due Date</span>
+        <span class="bid-info-value">${escHtml(b.due_date)}</span>
+      </div>` : ''}
+      ${b.value ? `<div class="bid-info-item">
+        <span class="bid-info-label">Est. Value</span>
+        <span class="bid-info-value">${escHtml(b.value)}</span>
+      </div>` : ''}
+      ${b.set_aside ? `<div class="bid-info-item">
+        <span class="bid-info-label">Set-Aside</span>
+        <span class="bid-info-value">${escHtml(b.set_aside)}</span>
+      </div>` : ''}
+    </div>
+
+    ${b.description ? `<div class="bid-desc">${escHtml(b.description)}</div>` : ''}
+    ${kwHtml}
+
+    <div class="bid-actions">
+      <div class="bid-actions-left">
+        <a class="btn-view" href="${b.source_url}" target="_blank" rel="noopener">
+          <svg viewBox="0 0 20 20"><path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z"/><path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z"/></svg>
+          View Solicitation
+        </a>
+        ${b.contact_email ? `<a href="mailto:${escHtml(b.contact_email)}" style="font-size:13px;color:#1a472a;text-decoration:none" title="${escHtml(b.contact_name || '')}">&#9993; Contact</a>` : ''}
+      </div>
+      <div class="bid-actions-right">
+        <select class="status-select" onchange="updateStatus(${b.id}, this.value)">${statusOpts}</select>
+      </div>
     </div>
   </div>`;
 }
