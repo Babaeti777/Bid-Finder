@@ -126,7 +126,10 @@ def _run_scraper_background():
         db = _get_db()
         try:
             _scraper_state["progress"].append("Starting bid scan...")
-            summary = run_scrapers(db=db)
+            summary = run_scrapers(
+                db=db,
+                progress_callback=lambda msg: _scraper_state["progress"].append(msg),
+            )
             _scraper_state["summary"] = summary
             _scraper_state["progress"].append(
                 f"Complete! Found {summary['total_found']} bids "

@@ -65,7 +65,7 @@ class BaseScraper(ABC):
         """
         pass
 
-    def _fetch(self, url, params=None, timeout=30):
+    def _fetch(self, url, params=None, timeout=15):
         """Fetch a URL and return the response. Lets errors propagate."""
         resp = self.session.get(url, params=params, timeout=timeout)
         resp.raise_for_status()

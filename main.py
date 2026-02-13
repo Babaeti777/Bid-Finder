@@ -25,7 +25,7 @@ from scrapers import get_scraper
 from scorer import score_opportunities
 
 
-def _run_scraper_with_retry(source_key, source_config, max_retries=3, backoff=5):
+def _run_scraper_with_retry(source_key, source_config, max_retries=2, backoff=2):
     """Run a single scraper with retry logic. Returns (results, error_msg_or_None)."""
     last_error = None
     for attempt in range(1, max_retries + 1):
@@ -44,16 +44,22 @@ def _run_scraper_with_retry(source_key, source_config, max_retries=3, backoff=5)
     return [], error_msg
 
 
-def run_scrapers(sources: list = None, db: BidDatabase = None) -> dict:
+def run_scrapers(sources: list = None, db: BidDatabase = None, progress_callback=None) -> dict:
     """
     Run all enabled scrapers (or specified ones) and store results.
     Returns a summary dict.
+    progress_callback: optional callable(msg) for live status updates.
     """
     if db is None:
         db = BidDatabase(OUTPUT["database"])
 
     if sources is None:
         sources = [k for k, v in SOURCES.items() if v.get("enabled", False)]
+
+    def _progress(msg):
+        print(msg)
+        if progress_callback:
+            progress_callback(msg)
 
     start_time = time.time()
     all_results = []
@@ -73,17 +79,16 @@ def run_scrapers(sources: list = None, db: BidDatabase = None) -> dict:
     print(f"  Run Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 60)
 
+    enabled_sources = []
     for source_key in sources:
         if source_key not in SOURCES:
-            print(f"\n[!] Unknown source: {source_key}")
             continue
-
         source_config = SOURCES[source_key]
-        if not source_config.get("enabled", False):
-            print(f"\n[~] {source_config['name']}: DISABLED (skipping)")
-            continue
+        if source_config.get("enabled", False):
+            enabled_sources.append((source_key, source_config))
 
-        print(f"\n[>] Scraping: {source_config['name']}...")
+    for i, (source_key, source_config) in enumerate(enabled_sources, 1):
+        _progress(f"Scanning {source_config['name']} ({i}/{len(enabled_sources)})...")
 
         results, error_msg = _run_scraper_with_retry(source_key, source_config)
         print(f"    Found: {len(results)} opportunities")
