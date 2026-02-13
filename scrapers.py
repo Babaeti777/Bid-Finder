@@ -451,6 +451,78 @@ class DCOCPScraper(BaseScraper):
 
 
 # ============================================================
+# MONTGOMERY COUNTY MD (Socrata Open Data JSON API)
+# ============================================================
+
+class MontgomeryCountyScraper(BaseScraper):
+    """
+    Montgomery County MD publishes solicitations via Socrata Open Data.
+    Returns structured JSON — no HTML scraping needed.
+    Dataset: https://data.montgomerycountymd.gov/Government/Active-Solicitations
+    """
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+
+        api_url = self.config.get(
+            "api_url",
+            "https://data.montgomerycountymd.gov/resource/di6a-s568.json"
+        )
+
+        params = {
+            "$order": "issuance_date DESC",
+            "$limit": 200,
+        }
+
+        print(f"    [MoCo MD] Querying Socrata API...")
+        resp = self._fetch(api_url, params=params)
+        data = resp.json()
+
+        print(f"    [MoCo MD] Got {len(data)} solicitations from API")
+
+        for record in data:
+            try:
+                title = record.get("description", "") or record.get("solicitation_title", "") or ""
+                sol_number = record.get("solicitation_number", "") or record.get("solicitation", "") or ""
+                agency = record.get("department", "") or record.get("agency", "") or ""
+                status = record.get("status", "")
+
+                combined = f"{title} {agency} {sol_number}"
+
+                if not self._is_construction_related(combined):
+                    continue
+
+                ptype, kw_matches = self._match_keywords(combined)
+
+                # Build URL to the county solicitation page
+                source_url = self.config.get("base_url", "")
+
+                bid = BidOpportunity(
+                    title=title or sol_number,
+                    source="montgomery_county",
+                    source_url=source_url,
+                    source_id=sol_number or self._generate_source_id("moco", title),
+                    description=f"Agency: {agency}" if agency else "",
+                    project_type=ptype,
+                    location_county="Montgomery County",
+                    location_state="MD",
+                    agency_name=agency or "Montgomery County MD",
+                    posted_date=record.get("issuance_date", ""),
+                    due_date=record.get("closing_date", "") or record.get("due_date", ""),
+                    keyword_matches=kw_matches,
+                    scraped_at=datetime.now().isoformat(),
+                )
+                results.append(bid)
+
+            except Exception as e:
+                print(f"    [MoCo MD] Error parsing record: {e}")
+
+        print(f"    [MoCo MD] Construction-related: {len(results)}")
+        self.results = results
+        return results
+
+
+# ============================================================
 # eVA VIRGINIA SCRAPER
 # ============================================================
 
@@ -701,23 +773,34 @@ class PermitScraper(BaseScraper):
 def get_scraper(source_key: str, source_config: dict) -> BaseScraper:
     """Return the appropriate scraper for a given source."""
     scraper_map = {
+        # API-based scrapers (JSON, most reliable)
         "sam_gov": SAMGovScraper,
+        "dc_ocp": DCOCPScraper,
+        "montgomery_county": MontgomeryCountyScraper,
+        # State portals
         "eva": EVAScraper,
+        # County/city HTML scrapers
         "arlington_county": CountyScraper,
         "fairfax_county": CountyScraper,
         "loudoun_county": CountyScraper,
         "prince_william": CountyScraper,
         "city_of_alexandria": CountyScraper,
         "city_of_fairfax": CountyScraper,
+        "prince_georges_county": CountyScraper,
+        "city_of_manassas": CountyScraper,
+        "stafford_county": CountyScraper,
+        # SPA sites (may return limited results without JS)
+        "emma_maryland": CountyScraper,
+        "bidnet_direct": CountyScraper,
+        "the_blue_book": CountyScraper,
+        # Permit scrapers
         "arlington_permits": PermitScraper,
         "fairfax_permits": PermitScraper,
-        "dc_ocp": DCOCPScraper,
     }
 
     scraper_class = scraper_map.get(source_key)
     if scraper_class is None:
-        print(f"[!] No scraper implemented for '{source_key}' - skipping")
-        # Return a no-op scraper
+        # Fall back to generic HTML scraper for unknown sources
         return CountyScraper(source_key, source_config)
 
     return scraper_class(source_key, source_config)
