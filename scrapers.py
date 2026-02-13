@@ -250,8 +250,19 @@ class SAMGovScraper(BaseScraper):
         posted_from = (datetime.now() - timedelta(days=30)).strftime("%m/%d/%Y")
         posted_to = datetime.now().strftime("%m/%d/%Y")
 
+        scan_start = time.time()
+        MAX_SAM_SECONDS = 90  # Hard cap so SAM.gov doesn't monopolize the scan
+
+        _timed_out = False
         for state in states:
+            if _timed_out:
+                break
             for naics in COMPANY["naics_codes"]:
+                # Abort if we've been running too long
+                if time.time() - scan_start > MAX_SAM_SECONDS:
+                    print(f"    [SAM.gov] Time limit reached ({MAX_SAM_SECONDS}s) - stopping")
+                    _timed_out = True
+                    break
                 try:
                     params = {
                         "api_key": api_key,
@@ -265,7 +276,7 @@ class SAMGovScraper(BaseScraper):
                     }
 
                     print(f"    [SAM.gov] Querying {state} / NAICS {naics}...")
-                    resp = self._fetch(api_url, params=params, timeout=30)
+                    resp = self._fetch(api_url, params=params, timeout=15)
                     data = resp.json()
 
                     opps = data.get("opportunitiesData", [])
