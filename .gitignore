@@ -23,6 +23,9 @@ oak_bids_*.csv
 oak_bids_*.json
 oak_bids_*.xlsx
 
+# Runtime state
+.scan_state.json
+
 # IDE
 .vscode/
 .idea/
