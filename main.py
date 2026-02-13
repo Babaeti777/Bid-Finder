@@ -87,7 +87,18 @@ def run_scrapers(sources: list = None, db: BidDatabase = None, progress_callback
         if source_config.get("enabled", False):
             enabled_sources.append((source_key, source_config))
 
+    MAX_TOTAL_SECONDS = 120  # Hard cap: entire scan stops after 2 minutes
+
     for i, (source_key, source_config) in enumerate(enabled_sources, 1):
+        # Abort if total scan time exceeded
+        elapsed = time.time() - start_time
+        if elapsed > MAX_TOTAL_SECONDS:
+            _progress(f"Time limit reached ({MAX_TOTAL_SECONDS}s) - skipping remaining sources")
+            remaining = [s[1]["name"] for s in enabled_sources[i-1:]]
+            errors.append(f"Skipped due to time limit: {', '.join(remaining)}")
+            summary["errors"].append(errors[-1])
+            break
+
         _progress(f"Scanning {source_config['name']} ({i}/{len(enabled_sources)})...")
 
         results, error_msg = _run_scraper_with_retry(source_key, source_config)
