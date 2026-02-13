@@ -66,13 +66,32 @@ def logout():
     session.pop("authenticated", None)
     return redirect("/login")
 
-# Global state for background scraper
-_scraper_state = {
+# Global state for background scraper — stored on DISK so all gunicorn
+# workers can read it.  In-memory dicts are per-process and break with
+# multiple workers.
+SCAN_STATE_FILE = Path(__file__).parent / ".scan_state.json"
+
+_DEFAULT_SCAN_STATE = {
     "running": False,
     "progress": [],
     "summary": None,
     "error": None,
 }
+
+
+def _read_scan_state() -> dict:
+    """Read scan state from disk. Works across all gunicorn workers."""
+    try:
+        if SCAN_STATE_FILE.exists():
+            return json.loads(SCAN_STATE_FILE.read_text())
+    except Exception:
+        pass
+    return dict(_DEFAULT_SCAN_STATE)
+
+
+def _write_scan_state(state: dict):
+    """Write scan state to disk atomically."""
+    SCAN_STATE_FILE.write_text(json.dumps(state))
 
 DEFAULT_SETTINGS = {
     "gmail_address": "",
@@ -113,35 +132,46 @@ def _get_db():
     return BidDatabase(DB_PATH)
 
 
+def _update_progress(msg):
+    """Append a progress message to the scan state file."""
+    state = _read_scan_state()
+    state["progress"].append(msg)
+    _write_scan_state(state)
+
+
 def _run_scraper_background():
-    """Run scrapers in a background thread."""
-    global _scraper_state
-    _scraper_state["running"] = True
-    _scraper_state["progress"] = []
-    _scraper_state["summary"] = None
-    _scraper_state["error"] = None
+    """Run scrapers in a background thread.  State is written to disk."""
+    _write_scan_state({
+        "running": True,
+        "progress": ["Starting bid scan..."],
+        "summary": None,
+        "error": None,
+    })
 
     try:
         from main import run_scrapers
         db = _get_db()
         try:
-            _scraper_state["progress"].append("Starting bid scan...")
             summary = run_scrapers(
                 db=db,
-                progress_callback=lambda msg: _scraper_state["progress"].append(msg),
+                progress_callback=_update_progress,
             )
-            _scraper_state["summary"] = summary
-            _scraper_state["progress"].append(
+            state = _read_scan_state()
+            state["running"] = False
+            state["summary"] = summary
+            state["progress"].append(
                 f"Complete! Found {summary['total_found']} bids "
                 f"({summary['new_opportunities']} new)"
             )
+            _write_scan_state(state)
         finally:
             db.close()
     except Exception as e:
-        _scraper_state["error"] = str(e)
-        _scraper_state["progress"].append(f"Error: {e}")
-    finally:
-        _scraper_state["running"] = False
+        state = _read_scan_state()
+        state["running"] = False
+        state["error"] = str(e)
+        state["progress"].append(f"Error: {e}")
+        _write_scan_state(state)
 
 
 # ============================================================
@@ -265,7 +295,8 @@ def api_run():
     if not is_api_auth and not is_session_auth:
         return jsonify({"error": "unauthorized"}), 401
 
-    if _scraper_state["running"]:
+    state = _read_scan_state()
+    if state.get("running"):
         return jsonify({"status": "already_running"}), 409
     t = threading.Thread(target=_run_scraper_background, daemon=True)
     t.start()
@@ -275,12 +306,7 @@ def api_run():
 @app.route("/api/run/status")
 @login_required
 def api_run_status():
-    return jsonify({
-        "running": _scraper_state["running"],
-        "progress": _scraper_state["progress"],
-        "summary": _scraper_state["summary"],
-        "error": _scraper_state["error"],
-    })
+    return jsonify(_read_scan_state())
 
 
 @app.route("/api/status", methods=["POST"])
@@ -986,24 +1012,15 @@ button[type=submit]:hover{background:#245a36}
 # MAIN
 # ============================================================
 
-def _auto_scan_if_empty():
-    """Auto-trigger a scan if the database has no bids (e.g. after Render cold start)."""
-    try:
-        db = _get_db()
-        count = db.conn.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
-        db.close()
-        if count == 0:
-            print("[Auto-scan] Database is empty - starting background scan...")
-            t = threading.Thread(target=_run_scraper_background, daemon=True)
-            t.start()
-        else:
-            print(f"[Startup] Database has {count} bids.")
-    except Exception as e:
-        print(f"[Auto-scan] Check failed: {e}")
-
-
-# Run auto-scan on import (works with both `python app.py` and gunicorn)
-_auto_scan_if_empty()
+# Clear stale scan state on startup (if a previous scan crashed mid-run)
+try:
+    _old = _read_scan_state()
+    if _old.get("running"):
+        _old["running"] = False
+        _old["error"] = "Scan interrupted by server restart"
+        _write_scan_state(_old)
+except Exception:
+    pass
 
 
 if __name__ == "__main__":
