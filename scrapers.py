@@ -383,7 +383,7 @@ class DCOCPScraper(BaseScraper):
         }
 
         print(f"    [DC OCP] Querying ArcGIS API...")
-        resp = self._fetch(self.API_URL, params=params, timeout=30)
+        resp = self._fetch(self.API_URL, params=params)
         data = resp.json()
 
         features = data.get("features", [])
@@ -458,7 +458,7 @@ class EVAScraper(BaseScraper):
         # Try with construction category filter
         params = {"status": "Open"}
         print(f"    [eVA] Fetching {base_url}...")
-        resp = self._fetch(base_url, params=params, timeout=30)
+        resp = self._fetch(base_url, params=params)
         print(f"    [eVA] Response: {resp.status_code}, size: {len(resp.text)} bytes")
 
         soup = BeautifulSoup(resp.text, "lxml")
@@ -525,7 +525,7 @@ class CountyScraper(BaseScraper):
         name = self.config.get("name", self.source_key)
 
         print(f"    [{name}] Fetching {base_url}...")
-        resp = self._fetch(base_url, timeout=30)
+        resp = self._fetch(base_url)
         print(f"    [{name}] Response: {resp.status_code}, size: {len(resp.text)} bytes")
 
         soup = BeautifulSoup(resp.text, "lxml")
@@ -625,7 +625,7 @@ class PermitScraper(BaseScraper):
         name = self.config.get("name", self.source_key)
 
         print(f"    [{name}] Fetching {base_url}...")
-        resp = self._fetch(base_url, timeout=30)
+        resp = self._fetch(base_url)
         print(f"    [{name}] Response: {resp.status_code}, size: {len(resp.text)} bytes")
 
         soup = BeautifulSoup(resp.text, "lxml")
