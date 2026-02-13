@@ -319,7 +319,10 @@ class SAMGovScraper(BaseScraper):
                     time.sleep(1)  # Rate limiting
 
                 except requests.exceptions.HTTPError as e:
-                    if e.response is not None and e.response.status_code == 403:
+                    if e.response is not None and e.response.status_code == 404:
+                        # 404 = no results for this NAICS/state combo, not an error
+                        pass
+                    elif e.response is not None and e.response.status_code == 403:
                         print(f"    [SAM.gov] API key may be invalid or expired (403)")
                         raise  # Propagate to trigger retry
                     elif e.response is not None and e.response.status_code == 429:
