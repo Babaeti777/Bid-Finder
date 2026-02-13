@@ -54,3 +54,12 @@ jobs:
           path: oak_bids.db
           retention-days: 90
           overwrite: true
+
+      - name: Trigger scan on hosted dashboard
+        if: ${{ secrets.RENDER_APP_URL != '' && secrets.API_TRIGGER_KEY != '' }}
+        run: |
+          echo "Triggering scan on hosted dashboard..."
+          curl -s -X POST \
+            "${{ secrets.RENDER_APP_URL }}/api/run?key=${{ secrets.API_TRIGGER_KEY }}" \
+            --max-time 10 || echo "Dashboard trigger skipped (may be sleeping)"
+        continue-on-error: true

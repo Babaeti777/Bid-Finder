@@ -2,31 +2,69 @@
 OAK BUILDERS LLC - Bid Finder
 Web Dashboard & Desktop App (PWA)
 
-Run:   python app.py
-Open:  http://localhost:8080
-Install: Click "Install App" in the browser to add to your desktop
+Local:  python app.py           -> http://localhost:8080
+Cloud:  Deployed via Render.com -> accessible from any device
+Install: Click "Install App" in the browser to add to your home screen
 """
 
 import json
 import os
 import threading
 import time
+import functools
 from datetime import datetime
 from pathlib import Path
 
 from flask import (
     Flask, render_template_string, request, redirect,
-    url_for, flash, jsonify, Response,
+    url_for, flash, jsonify, Response, session,
 )
 
 from config import SOURCES, OUTPUT
 from models import BidDatabase
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24))
 
 DB_PATH = OUTPUT["database"]
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
+
+# ============================================================
+# AUTHENTICATION (password-protect when hosted publicly)
+# ============================================================
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+API_TRIGGER_KEY = os.environ.get("API_TRIGGER_KEY", "")
+
+
+def login_required(f):
+    """Decorator: redirect to login page if not authenticated."""
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        if APP_PASSWORD and not session.get("authenticated"):
+            return redirect(url_for("login", next=request.path))
+        return f(*args, **kwargs)
+    return wrapper
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not APP_PASSWORD:
+        return redirect("/")
+    error = ""
+    if request.method == "POST":
+        if request.form.get("password") == APP_PASSWORD:
+            session["authenticated"] = True
+            session.permanent = True
+            next_url = request.args.get("next", "/")
+            return redirect(next_url)
+        error = "Wrong password"
+    return render_template_string(LOGIN_HTML, error=error)
+
+
+@app.route("/logout")
+def logout():
+    session.pop("authenticated", None)
+    return redirect("/login")
 
 # Global state for background scraper
 _scraper_state = {
@@ -108,11 +146,13 @@ def _run_scraper_background():
 # ============================================================
 
 @app.route("/")
+@login_required
 def dashboard():
     return render_template_string(DASHBOARD_HTML)
 
 
 @app.route("/settings", methods=["GET", "POST"])
+@login_required
 def settings():
     if request.method == "POST":
         s = load_settings()
@@ -144,6 +184,7 @@ def settings():
 # ============================================================
 
 @app.route("/api/stats")
+@login_required
 def api_stats():
     db = _get_db()
     try:
@@ -158,6 +199,7 @@ def api_stats():
 
 
 @app.route("/api/bids")
+@login_required
 def api_bids():
     db = _get_db()
     try:
@@ -203,6 +245,14 @@ def api_bids():
 
 @app.route("/api/run", methods=["POST"])
 def api_run():
+    # Allow access via API trigger key (for GitHub Actions) or login session
+    trigger_key = request.args.get("key") or request.headers.get("X-API-Key")
+    is_api_auth = API_TRIGGER_KEY and trigger_key == API_TRIGGER_KEY
+    is_session_auth = not APP_PASSWORD or session.get("authenticated")
+
+    if not is_api_auth and not is_session_auth:
+        return jsonify({"error": "unauthorized"}), 401
+
     if _scraper_state["running"]:
         return jsonify({"status": "already_running"}), 409
     t = threading.Thread(target=_run_scraper_background, daemon=True)
@@ -211,6 +261,7 @@ def api_run():
 
 
 @app.route("/api/run/status")
+@login_required
 def api_run_status():
     return jsonify({
         "running": _scraper_state["running"],
@@ -221,6 +272,7 @@ def api_run_status():
 
 
 @app.route("/api/status", methods=["POST"])
+@login_required
 def api_update_status():
     data = request.get_json()
     opp_id = data.get("id")
@@ -275,6 +327,46 @@ def icon():
 <text x="50" y="78" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="14" fill="#ffc107">BID FINDER</text>
 </svg>"""
     return Response(svg.strip(), mimetype="image/svg+xml")
+
+
+# ============================================================
+# LOGIN HTML
+# ============================================================
+
+LOGIN_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#1a472a">
+<title>Login - OAK Builders Bid Finder</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login-box{background:#fff;border-radius:12px;padding:40px;box-shadow:0 4px 24px rgba(0,0,0,.1);width:100%;max-width:380px;text-align:center}
+.login-box img{width:64px;height:64px;border-radius:12px;margin-bottom:16px}
+.login-box h1{color:#1a472a;font-size:22px;margin-bottom:4px}
+.login-box p{color:#888;font-size:14px;margin-bottom:24px}
+.login-box input[type=password]{width:100%;padding:12px;border:2px solid #ddd;border-radius:8px;font-size:16px;margin-bottom:16px;text-align:center;transition:.2s}
+.login-box input[type=password]:focus{border-color:#1a472a;outline:none}
+.login-box button{width:100%;padding:12px;background:#1a472a;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;transition:.15s}
+.login-box button:hover{background:#245a36}
+.error{color:#dc3545;font-size:14px;margin-bottom:12px}
+</style>
+</head>
+<body>
+<div class="login-box">
+  <img src="/icon.svg" alt="">
+  <h1>OAK Builders</h1>
+  <p>Bid Finder Dashboard</p>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="POST">
+    <input type="password" name="password" placeholder="Enter password" autofocus>
+    <button type="submit">Sign In</button>
+  </form>
+</div>
+</body>
+</html>"""
 
 
 # ============================================================
@@ -807,13 +899,19 @@ button[type=submit]:hover{background:#245a36}
 # ============================================================
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    debug = os.environ.get("FLASK_ENV") != "production"
     print("=" * 50)
     print("  OAK Builders - Bid Finder Dashboard")
-    print("  Open: http://localhost:8080")
+    print(f"  Open: http://localhost:{port}")
+    if APP_PASSWORD:
+        print(f"  Password protection: ON")
+    else:
+        print(f"  Password protection: OFF (set APP_PASSWORD to enable)")
     print()
     print("  To install on desktop:")
     print("  1. Open in Chrome/Edge")
     print("  2. Click the install icon in the address bar")
     print("     or click 'Install App' banner on the page")
     print("=" * 50)
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=debug)
