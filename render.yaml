@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: oak-bid-finder
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.7"
+      - key: APP_PASSWORD
+        sync: false  # Set manually in Render dashboard
+      - key: SAM_GOV_API_KEY
+        sync: false
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: API_TRIGGER_KEY
+        generateValue: true
