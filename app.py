@@ -642,7 +642,20 @@ async function startScan() {
 
 function pollProgress() {
   if (pollTimer) clearInterval(pollTimer);
+  let pollCount = 0;
   pollTimer = setInterval(async () => {
+    pollCount++;
+    // Safety: stop polling after 3 minutes no matter what
+    if (pollCount > 120) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      document.getElementById('runBtn').classList.remove('running');
+      document.getElementById('runBtn').disabled = false;
+      document.getElementById('runStatus').textContent = 'Scan timed out. Refresh the page to check results.';
+      loadStats();
+      loadBids();
+      return;
+    }
     try {
       const r = await fetch('/api/run/status');
       const s = await r.json();
@@ -663,6 +676,8 @@ function pollProgress() {
           const sm = s.summary;
           status.textContent = `Done! ${sm.total_found} bids found (${sm.new_opportunities} new) from ${sm.sources_searched.length} sources in ${(sm.run_date || '').split('T')[0] || 'today'}`;
           if (sm.errors && sm.errors.length) status.textContent += ` | ${sm.errors.length} source errors`;
+        } else {
+          status.textContent = 'Scan finished. Refresh to see results.';
         }
         loadStats();
         loadBids();
