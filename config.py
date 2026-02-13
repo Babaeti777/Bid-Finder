@@ -433,20 +433,41 @@ LOCATIONS = {
 # DATA SOURCES
 # ============================================================
 SOURCES = {
-    # --- Public Bid Boards (Free) ---
+    # ==========================================================
+    # FREE GOVERNMENT — API-based (most reliable)
+    # ==========================================================
     "sam_gov": {
         "name": "SAM.gov (Federal)",
         "base_url": "https://sam.gov/search/?index=opp",
         "api_url": "https://api.sam.gov/prod/opportunities/v2/search",
-        "api_key_env": "SAM_GOV_API_KEY",  # Set as env variable
+        "api_key_env": "SAM_GOV_API_KEY",
         "enabled": True,
         "type": "government",
         "cost": "free",
     },
+    "dc_ocp": {
+        "name": "DC Office of Contracting & Procurement",
+        "base_url": "https://contracts.ocp.dc.gov/solicitations/search",
+        "api_url": "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Government_Operations/MapServer/19/query",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+    },
+    "montgomery_county": {
+        "name": "Montgomery County MD (Open Data)",
+        "base_url": "https://www.montgomerycountymd.gov/PRO/solicitations/formal-solicitations.html",
+        "api_url": "https://data.montgomerycountymd.gov/resource/di6a-s568.json",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+    },
+
+    # ==========================================================
+    # FREE GOVERNMENT — HTML scraping (server-rendered)
+    # ==========================================================
     "eva": {
         "name": "eVA (Virginia)",
         "base_url": "https://mvendor.cgieva.com/Vendor/public/AllOpportunities.jsp",
-        "api_url": None,
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -455,13 +476,6 @@ SOURCES = {
         "name": "Arlington County Procurement",
         "base_url": "https://vrapp.vendorregistry.com/Bids/View/BidsList?BuyerId=a596c7c4-0123-4202-bf15-3583300ee088",
         "enabled": True,
-        "type": "government",
-        "cost": "free",
-    },
-    "fairfax_county": {
-        "name": "Fairfax County Procurement",
-        "base_url": "https://fairfaxcounty.bonfirehub.com/portal/?tab=openOpportunities",
-        "enabled": False,  # Bonfire SPA - requires JavaScript rendering (Selenium)
         "type": "government",
         "cost": "free",
     },
@@ -493,32 +507,56 @@ SOURCES = {
         "type": "government",
         "cost": "free",
     },
-
-    # --- Additional Free Government Sources ---
-    "dc_ocp": {
-        "name": "DC Office of Contracting and Procurement",
-        "base_url": "https://contracts.ocp.dc.gov/solicitations/search",
-        "api_url": "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Government_Operations/MapServer/19/query",
+    "prince_georges_county": {
+        "name": "Prince George's County MD Procurement",
+        "base_url": "https://www.princegeorgescountymd.gov/Bids.aspx",
         "enabled": True,
+        "type": "government",
+        "cost": "free",
+    },
+    "city_of_manassas": {
+        "name": "City of Manassas Procurement",
+        "base_url": "https://www.manassasva.gov/purchasing/bid_postings.php",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+    },
+    "stafford_county": {
+        "name": "Stafford County Procurement",
+        "base_url": "https://staffordcountyva.gov/government/finance/central_procurement_division/bid_opportunities.php",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+    },
+
+    # ==========================================================
+    # FREE GOVERNMENT — JavaScript SPAs (may return limited results)
+    # ==========================================================
+    "fairfax_county": {
+        "name": "Fairfax County Procurement",
+        "base_url": "https://fairfaxcounty.bonfirehub.com/portal/?tab=openOpportunities",
+        "enabled": True,  # Bonfire SPA - may need JS, will try anyway
         "type": "government",
         "cost": "free",
     },
     "emma_maryland": {
         "name": "eMarylandMarketplace (eMMA)",
         "base_url": "https://emma.maryland.gov/page.aspx/en/rfp/request_browse_public",
-        "enabled": False,  # Ivalua SPA - requires JavaScript rendering (Selenium)
+        "enabled": True,  # Ivalua SPA - may need JS, will try anyway
         "type": "government",
         "cost": "free",
     },
     "bidnet_direct": {
         "name": "BidNet Direct (Free Tier)",
         "base_url": "https://www.bidnetdirect.com/virginia",
-        "enabled": False,  # SOVRA SPA - requires JavaScript rendering (Selenium)
+        "enabled": True,  # SOVRA SPA - may need JS, will try anyway
         "type": "commercial",
         "cost": "free",
     },
 
-    # --- Commercial / Private Sector (Paid) ---
+    # ==========================================================
+    # COMMERCIAL / PAID (enabled when credentials are configured)
+    # ==========================================================
     "dodge_construction": {
         "name": "Dodge Construction Network",
         "base_url": "https://www.construction.com",
@@ -536,23 +574,25 @@ SOURCES = {
     "the_blue_book": {
         "name": "The Blue Book",
         "base_url": "https://www.thebluebook.com",
-        "enabled": False,  # Requires JS rendering
+        "enabled": True,  # Free, may need JS
         "type": "commercial",
         "cost": "free",
     },
 
-    # --- Permit Data (Free) ---
+    # ==========================================================
+    # PERMIT DATA
+    # ==========================================================
     "arlington_permits": {
         "name": "Arlington County Building Permits",
         "base_url": "https://permits.arlingtonva.us/",
-        "enabled": False,  # Permit portal requires JavaScript rendering
+        "enabled": True,  # May need JS, will try
         "type": "permits",
         "cost": "free",
     },
     "fairfax_permits": {
         "name": "Fairfax County Building Permits",
         "base_url": "https://www.fairfaxcounty.gov/landdevelopment/building-permits",
-        "enabled": False,  # Info page, not live permit data
+        "enabled": True,  # Info page - will try to find links
         "type": "permits",
         "cost": "free",
     },
