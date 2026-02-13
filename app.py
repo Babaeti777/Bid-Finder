@@ -221,15 +221,17 @@ def api_bids():
                 value = f"${b.estimated_value_min:,.0f} - ${b.estimated_value_max:,.0f}"
             else:
                 value = ""
-            # Friendly source name from config
+            # Friendly source name and listing page from config
             source_info = SOURCES.get(b.source, {})
             source_name = source_info.get("name", b.source.replace("_", " ").title())
+            source_page = source_info.get("base_url", "")
             results.append({
                 "id": getattr(b, "id", 0),
                 "title": b.title,
                 "source": b.source,
                 "source_name": source_name,
                 "source_url": b.source_url,
+                "source_page": source_page,
                 "project_type": b.project_type or "other",
                 "location": location,
                 "value": value,
@@ -806,6 +808,7 @@ function renderCard(b) {
           <svg viewBox="0 0 20 20"><path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z"/><path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z"/></svg>
           View Solicitation
         </a>
+        ${b.source_page && b.source_page !== b.source_url ? `<a class="btn-view" href="${b.source_page}" target="_blank" rel="noopener" style="background:#6c757d">Browse Source</a>` : ''}
         ${b.contact_email ? `<a href="mailto:${escHtml(b.contact_email)}" style="font-size:13px;color:#1a472a;text-decoration:none" title="${escHtml(b.contact_name || '')}">&#9993; Contact</a>` : ''}
       </div>
       <div class="bid-actions-right">
@@ -964,6 +967,26 @@ button[type=submit]:hover{background:#245a36}
 # ============================================================
 # MAIN
 # ============================================================
+
+def _auto_scan_if_empty():
+    """Auto-trigger a scan if the database has no bids (e.g. after Render cold start)."""
+    try:
+        db = _get_db()
+        count = db.conn.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
+        db.close()
+        if count == 0:
+            print("[Auto-scan] Database is empty - starting background scan...")
+            t = threading.Thread(target=_run_scraper_background, daemon=True)
+            t.start()
+        else:
+            print(f"[Startup] Database has {count} bids.")
+    except Exception as e:
+        print(f"[Auto-scan] Check failed: {e}")
+
+
+# Run auto-scan on import (works with both `python app.py` and gunicorn)
+_auto_scan_if_empty()
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))

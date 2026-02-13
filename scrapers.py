@@ -151,6 +151,18 @@ class BaseScraper(ABC):
             return False
         return True
 
+    def _make_detail_url(self, base_url, href):
+        """Build a full URL. Returns base_url if href resolves to just the site root."""
+        if not href or not self._is_valid_href(href):
+            return base_url
+        url = urljoin(base_url, href)
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        # If the link just goes to the homepage, return the listing page instead
+        if parsed.path in ("", "/", "/index.html", "/index.htm"):
+            return base_url
+        return url
+
     def _find_links_broad(self, soup):
         """Try multiple strategies to find bid listing links."""
         results = []
@@ -466,7 +478,7 @@ class EVAScraper(BaseScraper):
                 if not self._is_construction_related(combined):
                     continue
 
-                link = urljoin(base_url, href)
+                link = self._make_detail_url(base_url, href)
                 ptype, kw_matches = self._match_keywords(combined)
                 loc = self._match_location(combined)
 
@@ -557,7 +569,7 @@ class CountyScraper(BaseScraper):
                 if not is_bid_link and not is_construction:
                     continue
 
-                link = urljoin(base_url, href)
+                link = self._make_detail_url(base_url, href)
                 ptype, kw_matches = self._match_keywords(combined)
 
                 county_name = name.replace(" Procurement", "")
