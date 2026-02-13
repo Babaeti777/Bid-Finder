@@ -56,10 +56,13 @@ jobs:
           overwrite: true
 
       - name: Trigger scan on hosted dashboard
-        if: ${{ secrets.RENDER_APP_URL != '' && secrets.API_TRIGGER_KEY != '' }}
+        env:
+          RENDER_APP_URL: ${{ secrets.RENDER_APP_URL }}
+          API_TRIGGER_KEY: ${{ secrets.API_TRIGGER_KEY }}
+        if: env.RENDER_APP_URL != ''
         run: |
           echo "Triggering scan on hosted dashboard..."
           curl -s -X POST \
-            "${{ secrets.RENDER_APP_URL }}/api/run?key=${{ secrets.API_TRIGGER_KEY }}" \
+            "${RENDER_APP_URL}/api/run?key=${API_TRIGGER_KEY}" \
             --max-time 10 || echo "Dashboard trigger skipped (may be sleeping)"
         continue-on-error: true

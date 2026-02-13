@@ -372,19 +372,8 @@ class DCOCPScraper(BaseScraper):
 
                 combined = f"{title} {agency}"
 
-                title = self._clean_text(title_el.get_text())
-                link = urljoin(self.config["base_url"], title_el.get("href", ""))
-
-                # Filter: only construction-related (uses shared filter terms + top keywords)
-                combined = title.lower()
-                if not any(
-                    kw in combined
-                    for kwlist in KEYWORDS.values()
-                    for kw in kwlist[:15]
-                ) and not any(
-                    term in combined
-                    for term in SCRAPER_FILTER_TERMS
-                ):
+                # Filter for construction-related
+                if not self._is_construction_related(combined):
                     continue
 
                 ptype, kw_matches = self._match_keywords(combined)
