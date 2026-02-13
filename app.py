@@ -535,9 +535,10 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;color:#333;min-h
   <div>
     <div class="filter-label">Min Score</div>
     <select id="filterScore" onchange="loadBids()">
-      <option value="0">Any Score</option>
+      <option value="0" selected>Any Score</option>
+      <option value="30">30+</option>
       <option value="50">50+</option>
-      <option value="60" selected>60+</option>
+      <option value="60">60+</option>
       <option value="70">70+</option>
       <option value="80">80+</option>
     </select>
