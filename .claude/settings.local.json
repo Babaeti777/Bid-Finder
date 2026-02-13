@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(ls:*)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "WebFetch(domain:eva.virginia.gov)",
+      "WebFetch(domain:ocp.dc.gov)",
+      "WebFetch(domain:emma.maryland.gov)"
+    ]
+  }
+}
