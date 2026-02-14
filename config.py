@@ -387,14 +387,31 @@ SCRAPER_FILTER_TERMS = [
 # ============================================================
 LOCATIONS = {
     "counties": [
+        # Core NOVA
         "Arlington County",
         "Fairfax County",
         "Loudoun County",
         "Prince William County",
+        # Outer VA
         "Fauquier County",
         "Stafford County",
+        "Spotsylvania County",
+        "Culpeper County",
+        "Clarke County",
+        "Warren County",
+        "Rappahannock County",
+        "King George County",
+        # Maryland
+        "Montgomery County",
+        "Prince George's County",
+        "Howard County",
+        "Anne Arundel County",
+        "Frederick County",
+        "Charles County",
+        "Calvert County",
     ],
     "cities": [
+        # Core NOVA cities & towns
         "Falls Church",
         "Alexandria",
         "Fairfax",
@@ -414,17 +431,45 @@ LOCATIONS = {
         "Woodbridge",
         "Annandale",
         "Burke",
+        "Dumfries",
+        "Warrenton",
+        "Purcellville",
+        # Outer VA cities
+        "Fredericksburg",
+        "Winchester",
+        "Front Royal",
+        "Culpeper",
+        # Maryland cities
+        "Bethesda",
+        "Rockville",
+        "Silver Spring",
+        "Gaithersburg",
+        "Germantown",
+        "Bowie",
+        "College Park",
+        "Laurel",
+        "Greenbelt",
+        "Takoma Park",
+        "Hyattsville",
+        "Frederick",
+        "Waldorf",
+        "La Plata",
+        "Columbia",
+        "Ellicott City",
+        "Annapolis",
+        "Glen Burnie",
     ],
-    "zip_prefixes": ["201", "220", "221", "222"],
+    "zip_prefixes": ["200", "201", "207", "208", "209", "220", "221", "222", "223", "226"],
     "extended_area": {
         "dc": True,
         "maryland": [
             "Montgomery County",
             "Prince George's County",
-            "Bethesda",
-            "Rockville",
-            "Silver Spring",
-            "College Park",
+            "Howard County",
+            "Anne Arundel County",
+            "Frederick County",
+            "Charles County",
+            "Calvert County",
         ],
     },
 }
@@ -434,7 +479,7 @@ LOCATIONS = {
 # ============================================================
 SOURCES = {
     # ==========================================================
-    # FREE GOVERNMENT — API-based (most reliable)
+    # TIER 1 — API-based sources (most reliable, scanned first)
     # ==========================================================
     "sam_gov": {
         "name": "SAM.gov (Federal)",
@@ -444,6 +489,7 @@ SOURCES = {
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "VA",  # Multi-state (VA/DC/MD) handled internally
     },
     "dc_ocp": {
         "name": "DC Office of Contracting & Procurement",
@@ -452,6 +498,7 @@ SOURCES = {
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "DC",
     },
     "montgomery_county": {
         "name": "Montgomery County MD (Open Data)",
@@ -460,10 +507,11 @@ SOURCES = {
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "MD",
     },
 
     # ==========================================================
-    # FREE GOVERNMENT — HTML scraping (server-rendered)
+    # TIER 2 — Core NOVA counties & cities (primary service area)
     # ==========================================================
     "eva": {
         "name": "eVA (Virginia)",
@@ -471,6 +519,15 @@ SOURCES = {
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "VA",
+    },
+    "fairfax_county": {
+        "name": "Fairfax County Procurement",
+        "base_url": "https://fairfaxcounty.bonfirehub.com/portal/?tab=openOpportunities",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
     },
     "arlington_county": {
         "name": "Arlington County Procurement",
@@ -478,6 +535,7 @@ SOURCES = {
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "VA",
     },
     "loudoun_county": {
         "name": "Loudoun County Procurement",
@@ -485,6 +543,7 @@ SOURCES = {
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "VA",
     },
     "prince_william": {
         "name": "Prince William County Procurement",
@@ -492,6 +551,7 @@ SOURCES = {
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "VA",
     },
     "city_of_alexandria": {
         "name": "City of Alexandria Procurement",
@@ -499,6 +559,7 @@ SOURCES = {
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "VA",
     },
     "city_of_fairfax": {
         "name": "City of Fairfax Procurement",
@@ -506,13 +567,15 @@ SOURCES = {
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "VA",
     },
-    "prince_georges_county": {
-        "name": "Prince George's County MD Procurement",
-        "base_url": "https://www.princegeorgescountymd.gov/Bids.aspx",
+    "city_of_falls_church": {
+        "name": "City of Falls Church Procurement",
+        "base_url": "https://www.fallschurchva.gov/Bids.aspx",
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "VA",
     },
     "city_of_manassas": {
         "name": "City of Manassas Procurement",
@@ -520,6 +583,15 @@ SOURCES = {
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "VA",
+    },
+    "city_of_manassas_park": {
+        "name": "City of Manassas Park Procurement",
+        "base_url": "https://www.manassasparkva.gov/government/departments/finance/purchasing",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
     },
     "stafford_county": {
         "name": "Stafford County Procurement",
@@ -527,31 +599,415 @@ SOURCES = {
         "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "VA",
+    },
+    "fauquier_county": {
+        "name": "Fauquier County Procurement",
+        "base_url": "https://www.fauquiercounty.gov/government/departments-a-g/county-administration/procurement",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "spotsylvania_county": {
+        "name": "Spotsylvania County Procurement",
+        "base_url": "https://www.spotsylvania.va.us/bids",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
     },
 
     # ==========================================================
-    # FREE GOVERNMENT — JavaScript SPAs (may return limited results)
+    # TIER 3 — Regional authorities (large construction budgets)
     # ==========================================================
-    "fairfax_county": {
-        "name": "Fairfax County Procurement",
-        "base_url": "https://fairfaxcounty.bonfirehub.com/portal/?tab=openOpportunities",
-        "enabled": True,  # Bonfire SPA - may need JS, will try anyway
+    "wmata": {
+        "name": "WMATA (Metro Transit)",
+        "base_url": "https://www.wmata.com/business/procurement/solicitations/",
+        "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "DC",
     },
+    "mwaa": {
+        "name": "Metropolitan Washington Airports Authority",
+        "base_url": "https://www.mwaa.com/business/procurement-opportunities",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "wssc_water": {
+        "name": "WSSC Water",
+        "base_url": "https://www.wsscwater.com/business/bids-proposals",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "dc_water": {
+        "name": "DC Water",
+        "base_url": "https://www.dcwater.com/procurement",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "DC",
+    },
+    "fairfax_water": {
+        "name": "Fairfax Water",
+        "base_url": "https://www.fairfaxwater.org/procurement",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "loudoun_water": {
+        "name": "Loudoun Water",
+        "base_url": "https://www.loudounwater.org/about-us/procurement",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "vre": {
+        "name": "Virginia Railway Express (VRE)",
+        "base_url": "https://www.vre.org/about/procurement/",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+
+    # ==========================================================
+    # TIER 4 — School districts (major construction spenders)
+    # ==========================================================
+    "fcps": {
+        "name": "Fairfax County Public Schools",
+        "base_url": "https://www.fcps.edu/about-fcps/procurement-services/current-solicitations",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "lcps": {
+        "name": "Loudoun County Public Schools",
+        "base_url": "https://www.lcps.org/Page/2010",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "pwcs": {
+        "name": "Prince William County Schools",
+        "base_url": "https://www.pwcs.edu/departments/office_of_financial_services/procurement_services",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "aps": {
+        "name": "Arlington Public Schools",
+        "base_url": "https://www.apsva.us/procurement/",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "acps": {
+        "name": "Alexandria City Public Schools",
+        "base_url": "https://www.acps.k12.va.us/departments/financial-services/procurement",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "mcps": {
+        "name": "Montgomery County Public Schools MD",
+        "base_url": "https://www.montgomeryschoolsmd.org/departments/procurement/",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "pgcps": {
+        "name": "Prince George's County Public Schools",
+        "base_url": "https://offices.pgcps.org/procurement/",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+
+    # ==========================================================
+    # TIER 5 — Maryland counties & cities
+    # ==========================================================
+    "prince_georges_county": {
+        "name": "Prince George's County MD Procurement",
+        "base_url": "https://www.princegeorgescountymd.gov/Bids.aspx",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "howard_county": {
+        "name": "Howard County MD Procurement",
+        "base_url": "https://www.howardcountymd.gov/departments/purchasing",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "anne_arundel_county": {
+        "name": "Anne Arundel County MD Procurement",
+        "base_url": "https://www.aacounty.org/departments/central-services/purchasing/",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "frederick_county_md": {
+        "name": "Frederick County MD Procurement",
+        "base_url": "https://frederickcountymd.gov/Bids.aspx",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "charles_county": {
+        "name": "Charles County MD Procurement",
+        "base_url": "https://www.charlescountymd.gov/services/economic-development-and-tourism/central-services-procurement",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "calvert_county": {
+        "name": "Calvert County MD Procurement",
+        "base_url": "https://www.calvertcountymd.gov/Bids.aspx",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "city_of_rockville": {
+        "name": "City of Rockville MD Procurement",
+        "base_url": "https://www.rockvillemd.gov/Bids.aspx",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "city_of_gaithersburg": {
+        "name": "City of Gaithersburg MD Procurement",
+        "base_url": "https://www.gaithersburgmd.gov/services/bids-and-proposals",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "city_of_bowie": {
+        "name": "City of Bowie MD Procurement",
+        "base_url": "https://www.cityofbowie.org/Bids.aspx",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "city_of_frederick": {
+        "name": "City of Frederick MD Procurement",
+        "base_url": "https://www.cityoffrederickmd.gov/Bids.aspx",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+
+    # ==========================================================
+    # TIER 6 — Outer VA counties, cities & towns
+    # ==========================================================
+    "culpeper_county": {
+        "name": "Culpeper County Procurement",
+        "base_url": "https://www.culpepercounty.gov/government/bids-rfps",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "warren_county": {
+        "name": "Warren County VA Procurement",
+        "base_url": "https://www.warrencountyva.net/departments/purchasing",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "clarke_county": {
+        "name": "Clarke County VA Procurement",
+        "base_url": "https://www.clarkecounty.gov/government/bids-rfps",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "king_george_county": {
+        "name": "King George County VA Procurement",
+        "base_url": "https://www.king-george.va.us/bids",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "city_of_fredericksburg": {
+        "name": "City of Fredericksburg Procurement",
+        "base_url": "https://www.fredericksburgva.gov/Bids.aspx",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "city_of_winchester": {
+        "name": "City of Winchester Procurement",
+        "base_url": "https://www.winchesterva.gov/finance/purchasing",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "town_of_herndon": {
+        "name": "Town of Herndon Procurement",
+        "base_url": "https://www.herndon-va.gov/departments/procurement",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "town_of_vienna": {
+        "name": "Town of Vienna Procurement",
+        "base_url": "https://www.viennava.gov/government/purchasing",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "town_of_leesburg": {
+        "name": "Town of Leesburg Procurement",
+        "base_url": "https://www.leesburgva.gov/government/departments/finance/purchasing-bids",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "town_of_warrenton": {
+        "name": "Town of Warrenton Procurement",
+        "base_url": "https://www.warrentonva.gov/government/departments/finance/bids-rfps",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "town_of_front_royal": {
+        "name": "Town of Front Royal Procurement",
+        "base_url": "https://www.frontroyalva.com/bids",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "town_of_purcellville": {
+        "name": "Town of Purcellville Procurement",
+        "base_url": "https://www.purcellvilleva.gov/bids",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "town_of_culpeper": {
+        "name": "Town of Culpeper Procurement",
+        "base_url": "https://www.culpeperva.gov/government/bids-rfps",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "town_of_dumfries": {
+        "name": "Town of Dumfries Procurement",
+        "base_url": "https://www.dumfriesva.gov/government/bids-rfps",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "rappahannock_county": {
+        "name": "Rappahannock County VA Procurement",
+        "base_url": "https://www.rappahannockcountyva.gov/bids",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+
+    # ==========================================================
+    # TIER 7 — Universities (construction/renovation projects)
+    # ==========================================================
+    "gmu": {
+        "name": "George Mason University Procurement",
+        "base_url": "https://fiscal.gmu.edu/procurement/",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "umd": {
+        "name": "University of Maryland Procurement",
+        "base_url": "https://procurement.umd.edu/",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "MD",
+    },
+    "nvcc": {
+        "name": "Northern Virginia Community College",
+        "base_url": "https://www.nvcc.edu/procurement/",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",
+    },
+    "gw_university": {
+        "name": "George Washington University Procurement",
+        "base_url": "https://procurement.gwu.edu/",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "DC",
+    },
+
+    # ==========================================================
+    # TIER 8 — Aggregator / SPA sites (may need JS)
+    # ==========================================================
     "emma_maryland": {
         "name": "eMarylandMarketplace (eMMA)",
         "base_url": "https://emma.maryland.gov/page.aspx/en/rfp/request_browse_public",
-        "enabled": True,  # Ivalua SPA - may need JS, will try anyway
+        "enabled": True,
         "type": "government",
         "cost": "free",
+        "state": "MD",
     },
     "bidnet_direct": {
         "name": "BidNet Direct (Free Tier)",
         "base_url": "https://www.bidnetdirect.com/virginia",
-        "enabled": True,  # SOVRA SPA - may need JS, will try anyway
+        "enabled": True,
         "type": "commercial",
         "cost": "free",
+        "state": "VA",
+    },
+    "the_blue_book": {
+        "name": "The Blue Book",
+        "base_url": "https://www.thebluebook.com",
+        "enabled": True,
+        "type": "commercial",
+        "cost": "free",
+        "state": "VA",
     },
 
     # ==========================================================
@@ -560,23 +1016,18 @@ SOURCES = {
     "dodge_construction": {
         "name": "Dodge Construction Network",
         "base_url": "https://www.construction.com",
-        "enabled": False,  # Requires paid subscription ~$400/mo
+        "enabled": False,
         "type": "commercial",
         "cost": "paid",
+        "state": "VA",
     },
     "building_connected": {
         "name": "BuildingConnected",
         "base_url": "https://www.buildingconnected.com",
-        "enabled": False,  # Free basic, ~$150/mo pro
+        "enabled": False,
         "type": "commercial",
         "cost": "paid",
-    },
-    "the_blue_book": {
-        "name": "The Blue Book",
-        "base_url": "https://www.thebluebook.com",
-        "enabled": True,  # Free, may need JS
-        "type": "commercial",
-        "cost": "free",
+        "state": "VA",
     },
 
     # ==========================================================
@@ -585,16 +1036,18 @@ SOURCES = {
     "arlington_permits": {
         "name": "Arlington County Building Permits",
         "base_url": "https://permits.arlingtonva.us/",
-        "enabled": True,  # May need JS, will try
+        "enabled": True,
         "type": "permits",
         "cost": "free",
+        "state": "VA",
     },
     "fairfax_permits": {
         "name": "Fairfax County Building Permits",
         "base_url": "https://www.fairfaxcounty.gov/landdevelopment/building-permits",
-        "enabled": True,  # Info page - will try to find links
+        "enabled": True,
         "type": "permits",
         "cost": "free",
+        "state": "VA",
     },
 }
 

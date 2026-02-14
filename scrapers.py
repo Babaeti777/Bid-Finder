@@ -656,11 +656,7 @@ class CountyScraper(BaseScraper):
                 ptype, kw_matches = self._match_keywords(combined)
 
                 county_name = name.replace(" Procurement", "")
-                state = "VA"
-                if "dc" in self.source_key.lower():
-                    state = "DC"
-                elif "maryland" in self.source_key.lower():
-                    state = "MD"
+                state = self.config.get("state", "VA")
 
                 bid = BidOpportunity(
                     title=title,
@@ -779,20 +775,6 @@ def get_scraper(source_key: str, source_config: dict) -> BaseScraper:
         "montgomery_county": MontgomeryCountyScraper,
         # State portals
         "eva": EVAScraper,
-        # County/city HTML scrapers
-        "arlington_county": CountyScraper,
-        "fairfax_county": CountyScraper,
-        "loudoun_county": CountyScraper,
-        "prince_william": CountyScraper,
-        "city_of_alexandria": CountyScraper,
-        "city_of_fairfax": CountyScraper,
-        "prince_georges_county": CountyScraper,
-        "city_of_manassas": CountyScraper,
-        "stafford_county": CountyScraper,
-        # SPA sites (may return limited results without JS)
-        "emma_maryland": CountyScraper,
-        "bidnet_direct": CountyScraper,
-        "the_blue_book": CountyScraper,
         # Permit scrapers
         "arlington_permits": PermitScraper,
         "fairfax_permits": PermitScraper,
@@ -800,7 +782,7 @@ def get_scraper(source_key: str, source_config: dict) -> BaseScraper:
 
     scraper_class = scraper_map.get(source_key)
     if scraper_class is None:
-        # Fall back to generic HTML scraper for unknown sources
+        # All other sources use the generic HTML scraper
         return CountyScraper(source_key, source_config)
 
     return scraper_class(source_key, source_config)

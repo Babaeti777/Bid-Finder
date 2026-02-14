@@ -671,8 +671,8 @@ function pollProgress() {
   let pollCount = 0;
   pollTimer = setInterval(async () => {
     pollCount++;
-    // Safety: stop polling after 3 minutes no matter what
-    if (pollCount > 120) {
+    // Safety: stop polling after 9 minutes no matter what (~60 sources)
+    if (pollCount > 360) {
       clearInterval(pollTimer);
       pollTimer = null;
       document.getElementById('runBtn').classList.remove('running');
