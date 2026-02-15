@@ -602,6 +602,68 @@ class CountyScraper(BaseScraper):
     to handle different page structures.
     """
 
+    # Navigation / informational link patterns to reject
+    _SKIP_PATTERNS = [
+        "login", "sign in", "sign up", "register", "contact us",
+        "home", "about us", "faq", "help", "privacy",
+        "terms of", "sitemap", "search", "menu", "navigation",
+        "skip to", "accessibility", "translate", "language",
+        "facebook", "twitter", "instagram", "youtube", "linkedin",
+        "subscribe", "newsletter", "calendar", "events",
+        "how to", "learn more", "read more", "click here",
+        "departments", "directory", "staff", "employee",
+        "pay online", "report a", "request a", "submit a",
+        "map", "hours of operation", "location",
+        "news", "press release", "meeting",
+        "download", "forms", "application form",
+        "job", "career", "employment", "human resources",
+        "agendas", "minutes", "board meeting",
+        "code of ordinances", "zoning",
+        "parks", "recreation", "library",
+        "utility", "trash", "recycling", "water bill",
+        "permits", "licenses", "inspections",
+        "budget report", "financial report", "annual report",
+        "view all", "see all", "show all", "back to", "return to",
+        "vendor registration", "vendor self-service",
+        "copyright", "powered by", "all rights reserved",
+        "share this", "print this", "email this",
+    ]
+
+    # Patterns that strongly indicate a real bid/solicitation listing
+    _BID_INDICATORS = [
+        "solicitation", "rfp", "rfq", "ifb", "itb",
+        "invitation for bid", "request for proposal",
+        "request for quote", "request for qualification",
+    ]
+
+    def _looks_like_bid_listing(self, title, combined):
+        """Check if a link looks like an actual bid/solicitation listing."""
+        title_lower = title.lower()
+        combined_lower = combined.lower()
+
+        # Strong signal: contains a bid indicator keyword
+        if any(ind in combined_lower for ind in self._BID_INDICATORS):
+            return True
+
+        # Strong signal: has a solicitation number pattern
+        # e.g. "IFB-2024-001", "RFP 24-12", "Bid #2024-0042", "Sol. 25-001"
+        if re.search(r'(?:IFB|RFP|RFQ|ITB|SOL|BID)[\s#.-]*\d', combined, re.IGNORECASE):
+            return True
+
+        # Strong signal: has a reference number like "24-0012" or "#2024-042"
+        if re.search(r'#?\d{2,4}[-]\d{2,}', combined):
+            return True
+
+        # Medium signal: construction-related AND substantive title (not just a nav link)
+        if len(title) >= 25 and self._is_construction_related(combined):
+            return True
+
+        # Medium signal: title contains "bid" as a whole word (not "forbid", "morbid")
+        if re.search(r'\bbids?\b', title_lower):
+            return True
+
+        return False
+
     def scrape(self) -> List[BidOpportunity]:
         results = []
         base_url = self.config.get("base_url")
@@ -613,8 +675,13 @@ class CountyScraper(BaseScraper):
 
         soup = BeautifulSoup(resp.text, "lxml")
 
-        # Remove nav, header, footer to reduce noise
-        for tag in soup.select("nav, header, footer, .nav, .header, .footer, #nav, #header, #footer, .menu, .sidebar"):
+        # Remove nav, header, footer, sidebar to reduce noise
+        for tag in soup.select(
+            "nav, header, footer, .nav, .header, .footer, "
+            "#nav, #header, #footer, .menu, .sidebar, "
+            ".breadcrumb, .pagination, .social-links, "
+            "#breadcrumb, .dropdown-menu, .mega-menu"
+        ):
             tag.decompose()
 
         # Use broad link-finding strategy
@@ -628,28 +695,14 @@ class CountyScraper(BaseScraper):
                 extra = item.get("extra_text", "")
                 combined = f"{title} {extra}"
 
-                # Skip obviously non-bid links
-                if len(title) < 5:
+                # --- Reject obvious non-bid links ---
+                if len(title) < 10:
                     continue
-                skip_patterns = [
-                    "login", "sign in", "register", "contact us",
-                    "home", "about", "faq", "help", "privacy",
-                    "terms", "sitemap", "search", "menu",
-                    "skip to", "accessibility", "translate",
-                    "facebook", "twitter", "instagram", "youtube",
-                ]
-                if any(p in title.lower() for p in skip_patterns):
+                if any(p in title.lower() for p in self._SKIP_PATTERNS):
                     continue
 
-                # Filter for construction-related OR any link with bid-like keywords
-                bid_indicators = [
-                    "solicitation", "bid", "rfp", "rfq", "ifb",
-                    "procurement", "contract", "proposal", "quote",
-                ]
-                is_bid_link = any(ind in combined.lower() for ind in bid_indicators)
-                is_construction = self._is_construction_related(combined)
-
-                if not is_bid_link and not is_construction:
+                # --- Must look like a real bid listing ---
+                if not self._looks_like_bid_listing(title, combined):
                     continue
 
                 link = self._make_detail_url(base_url, href)
@@ -675,13 +728,11 @@ class CountyScraper(BaseScraper):
                 print(f"    [{name}] Error parsing listing: {e}")
 
         if not results:
-            # Check if page has meaningful content
             body_text = soup.get_text(strip=True)
             if len(body_text) < 500:
                 print(f"    [{name}] Page has very little content - may need JavaScript.")
             else:
                 print(f"    [{name}] Page has content but no bid listings matched filters.")
-                # Show sample of what we found to help debug
                 sample_links = [item["title"][:60] for item in listings[:5]]
                 if sample_links:
                     print(f"    [{name}] Sample links found: {sample_links}")

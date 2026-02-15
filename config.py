@@ -353,33 +353,26 @@ KEYWORDS = {
 # Broad terms used by scrapers to pre-filter listings before
 # keyword scoring. Expanding this list widens the net for ALL scrapers.
 SCRAPER_FILTER_TERMS = [
-    # Generic procurement words (appear in almost every solicitation)
-    "construction", "building", "renovation", "repair", "maintenance",
-    "facility", "contractor", "services", "project", "work",
-    "contract", "bid", "alterations", "modifications", "improvements",
-    "refurbishment", "rehabilitation",
+    # Construction-specific terms (NOT generic words like "services", "project", "work")
+    # These must be specific enough to not match government site navigation
+    "construction", "renovation", "repair", "demolition",
+    "contractor", "general contractor", "subcontractor",
+    "alterations", "modifications", "refurbishment", "rehabilitation",
+    "buildout", "build-out", "fit-out", "remodel",
     # Trades & scopes
     "waterproof", "roofing", "hvac", "plumbing", "electrical",
-    "demolition", "painting", "flooring", "concrete", "masonry",
+    "painting", "flooring", "concrete", "masonry",
     "carpentry", "drywall", "ceiling", "mechanical", "fire protection",
     "elevator", "sitework", "grading", "paving", "landscaping",
-    "fencing", "ADA", "abatement", "remediation", "restoration",
-    "remodel", "tenant", "buildout", "fit-out", "improvement",
-    "general contractor", "subcontractor", "architect",
-    "engineering", "structural", "exterior", "interior",
+    "fencing", "abatement", "remediation", "restoration",
+    "tenant improvement", "architect", "structural",
     "sprinkler", "fire alarm", "life safety", "caulk", "sealant",
     "coating", "pressure washing", "insulation", "framing",
-    # Building & facility types
-    "commercial", "industrial", "institutional", "municipal",
-    "courthouse", "hospital", "school", "university",
-    "office", "retail", "warehouse", "parking",
-    "library", "fire station", "recreation center", "community center",
-    "gymnasium", "garage", "bridge", "tunnel",
-    "church", "museum", "theater", "arena", "transit",
-    # Infrastructure & systems
-    "stormwater", "utilities", "sewer", "water main",
-    "door", "window", "roof", "facade", "envelope",
-    "modernization", "upgrade", "replacement", "installation",
+    # Specific building/facility scopes
+    "roof replacement", "window replacement", "door replacement",
+    "facade repair", "envelope repair", "parking garage",
+    "stormwater", "sewer", "water main",
+    "modernization", "ADA compliance", "ADA upgrade",
 ]
 
 # ============================================================

@@ -45,23 +45,29 @@ class RelevanceScorer:
         waterproofing_boost = 0
         for kw in KEYWORDS["waterproofing"]:
             if kw.lower() in combined:
-                waterproofing_boost = 5
+                waterproofing_boost = 8
                 break
 
-        base = min(match_count * 5, max_pts - 5)
+        # Scale: 1 match = 3pts, 2 = 8pts, 3 = 12pts, 4+ ramps to max
+        if match_count == 1:
+            base = 3
+        elif match_count == 2:
+            base = 8
+        else:
+            base = min(match_count * 4, max_pts - 5)
         return min(base + waterproofing_boost, max_pts)
 
     def _score_location(self, bid: BidOpportunity) -> int:
         """Score based on proximity to NOVA (max 25 pts)."""
         max_pts = SCORING["location_match"]
 
-        # Check city match
+        # Check city match (specific city in our service area)
         if bid.location_city:
             for city in LOCATIONS["cities"]:
                 if city.lower() in bid.location_city.lower():
                     return max_pts  # Perfect NOVA match
 
-        # Check county match
+        # Check county match (specific county in our service area)
         if bid.location_county:
             for county in LOCATIONS["counties"]:
                 if county.lower().replace(" county", "") in bid.location_county.lower():
@@ -73,15 +79,12 @@ class RelevanceScorer:
                 if bid.location_zip.startswith(prefix):
                     return max_pts - 3
 
-        # Check state-level
+        # State-level only (no specific city/county match)
+        # Lower score since we can't confirm it's in our service area
         if bid.location_state in ("VA", "Virginia"):
-            return max_pts // 2  # In-state but not confirmed NOVA
+            return 8
         if bid.location_state in ("DC", "MD", "Maryland"):
-            return max_pts // 2  # Extended service area
-
-        # If location unknown, give partial credit
-        if not bid.location_city and not bid.location_county and not bid.location_state:
-            return 5
+            return 8
 
         return 0
 
@@ -91,9 +94,9 @@ class RelevanceScorer:
         our_min = COMPANY["project_range"]["min"]
         our_max = COMPANY["project_range"]["max"]
 
-        # If no budget info, give partial credit
+        # No budget info = no budget score (don't inflate with free points)
         if bid.estimated_value_min is None and bid.estimated_value_max is None:
-            return max_pts // 3
+            return 0
 
         val_min = bid.estimated_value_min or 0
         val_max = bid.estimated_value_max or val_min
@@ -118,7 +121,7 @@ class RelevanceScorer:
         max_pts = SCORING["deadline_buffer"]
 
         if not bid.due_date:
-            return max_pts // 2  # Unknown deadline
+            return 0  # No deadline info = no deadline score
 
         try:
             # Try multiple date formats
@@ -131,7 +134,7 @@ class RelevanceScorer:
                     continue
 
             if not due:
-                return max_pts // 3
+                return 0
 
             days_left = (due - datetime.now()).days
 
@@ -149,14 +152,14 @@ class RelevanceScorer:
                 return int(max_pts * 0.9)  # Plenty of time
 
         except Exception:
-            return max_pts // 3
+            return 0
 
     def _score_set_aside(self, bid: BidOpportunity) -> int:
         """Score based on set-aside match (max 10 pts)."""
         max_pts = SCORING["set_aside_match"]
 
         if not bid.set_aside:
-            return max_pts // 2  # Open competition is fine
+            return 0  # No set-aside info = no bonus
 
         sa = bid.set_aside.lower()
 
