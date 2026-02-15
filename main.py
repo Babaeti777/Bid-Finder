@@ -116,20 +116,27 @@ def run_scrapers(sources: list = None, db: BidDatabase = None, progress_callback
     print(f"\n[*] Scoring {len(all_results)} opportunities...")
     scored = score_opportunities(all_results)
 
+    # Filter out very low-quality results (score < 5 = almost certainly noise)
+    MIN_STORE_SCORE = 5
+    quality_results = [opp for opp in scored if opp.relevance_score >= MIN_STORE_SCORE]
+    discarded = len(scored) - len(quality_results)
+    if discarded:
+        print(f"    Discarded {discarded} low-quality results (score < {MIN_STORE_SCORE})")
+
     # Store in database
     new_count = 0
-    for opp in scored:
+    for opp in quality_results:
         row_id = db.upsert_opportunity(opp)
         if row_id > 0:
             new_count += 1
 
     # Count by type
-    for opp in scored:
+    for opp in quality_results:
         ptype = opp.project_type or "unknown"
         summary["by_type"][ptype] = summary["by_type"].get(ptype, 0) + 1
 
     duration = time.time() - start_time
-    summary["total_found"] = len(scored)
+    summary["total_found"] = len(quality_results)
     summary["new_opportunities"] = new_count
 
     # Log the run

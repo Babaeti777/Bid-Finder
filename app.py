@@ -309,6 +309,20 @@ def api_run_status():
     return jsonify(_read_scan_state())
 
 
+@app.route("/api/clear", methods=["POST"])
+@login_required
+def api_clear():
+    """Clear all bid results from the database (fresh start after fixing scrapers)."""
+    db = _get_db()
+    try:
+        db.conn.execute("DELETE FROM opportunities")
+        db.conn.commit()
+        count = db.conn.execute("SELECT changes()").fetchone()[0]
+        return jsonify({"status": "ok", "deleted": count})
+    finally:
+        db.close()
+
+
 @app.route("/api/status", methods=["POST"])
 @login_required
 def api_update_status():
@@ -556,6 +570,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;color:#333;min-h
     <span class="spinner"></span>
     Run Scan Now
   </button>
+  <button class="btn-run" style="background:#dc3545;margin-left:8px;font-size:0.85rem;padding:10px 16px" onclick="clearAndRescan()">Clear &amp; Rescan</button>
   <div class="run-status" id="runStatus"></div>
 </div>
 
@@ -586,7 +601,8 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;color:#333;min-h
   <div>
     <div class="filter-label">Min Score</div>
     <select id="filterScore" onchange="loadBids()">
-      <option value="0" selected>Any Score</option>
+      <option value="0">Any Score</option>
+      <option value="20" selected>20+</option>
       <option value="30">30+</option>
       <option value="50">50+</option>
       <option value="60">60+</option>
@@ -638,6 +654,21 @@ async function loadStats() {
     document.getElementById('statHigh').textContent = s.high_relevance || 0;
     document.getElementById('statDue').textContent = s.due_this_week || 0;
   } catch(e) {}
+}
+
+// ---- Clear & Rescan ----
+async function clearAndRescan() {
+  if (!confirm('This will delete ALL current bid results and run a fresh scan. Continue?')) return;
+  try {
+    const r = await fetch('/api/clear', {method:'POST'});
+    const d = await r.json();
+    document.getElementById('runStatus').textContent = 'Cleared ' + d.deleted + ' old results. Starting fresh scan...';
+    loadStats();
+    loadBids();
+    startScan();
+  } catch(e) {
+    document.getElementById('runStatus').textContent = 'Clear failed: ' + e.message;
+  }
 }
 
 // ---- Run Scan ----
