@@ -14,7 +14,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from collections import defaultdict
 
-from config import NOTIFICATIONS
+from config import NOTIFICATIONS, SOURCES
 from models import BidDatabase
 
 
@@ -170,6 +170,7 @@ class EmailSender:
         else:
             score_color = "#dc3545"
 
+        source_name = SOURCES.get(opp.source, {}).get("name", opp.source.replace("_", " ").title())
         link_html = f'<a href="{opp.source_url}" style="color:#1a472a; text-decoration:none; font-weight:bold;">{opp.title[:80]}</a>'
 
         return f"""
@@ -183,7 +184,7 @@ class EmailSender:
     </div>
     <table style="width:100%; margin-top:8px; font-size:13px; color:#555;">
         <tr>
-            <td><strong>Source:</strong> {opp.source}</td>
+            <td><strong>Source:</strong> {source_name}</td>
             <td><strong>Location:</strong> {location or 'N/A'}</td>
         </tr>
         <tr>
