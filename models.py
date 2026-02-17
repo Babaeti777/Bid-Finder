@@ -3,6 +3,7 @@ OAK BUILDERS LLC - Bid Finder
 Database Models & Schema
 """
 
+import re
 import sqlite3
 import json
 from datetime import datetime
@@ -172,6 +173,20 @@ class BidDatabase:
         errors TEXT DEFAULT '[]',
         status TEXT DEFAULT 'sent'
     );
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS sheets_exports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        exported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(source, source_id)
+    );
     """
 
     def __init__(self, db_path: str = "oak_bids.db"):
@@ -339,6 +354,97 @@ class BidDatabase:
             json.dumps(errors or []),
             "sent",
         ])
+        self.conn.commit()
+
+    # --- Cross-source deduplication ---
+
+    @staticmethod
+    def _normalize_title(title: str) -> str:
+        """Normalize a title for comparison: lowercase, strip punctuation, collapse whitespace."""
+        t = title.lower()
+        t = re.sub(r'[^a-z0-9\s]', ' ', t)
+        t = re.sub(r'\s+', ' ', t).strip()
+        return t
+
+    def deduplicate(self) -> int:
+        """Remove cross-source duplicates, keeping the entry with the highest score.
+        Returns the number of duplicates removed."""
+        rows = self.conn.execute(
+            "SELECT id, title, source, relevance_score FROM opportunities ORDER BY relevance_score DESC"
+        ).fetchall()
+
+        seen = {}  # normalized_title -> (id, score, source)
+        to_delete = []
+
+        for row in rows:
+            norm = self._normalize_title(row["title"])
+            # Skip very short titles (too generic to dedup)
+            if len(norm) < 20:
+                continue
+
+            if norm in seen:
+                # Keep the one with the higher score (already processed since sorted DESC)
+                to_delete.append(row["id"])
+            else:
+                seen[norm] = (row["id"], row["relevance_score"], row["source"])
+
+        if to_delete:
+            # Delete in batches
+            for i in range(0, len(to_delete), 100):
+                batch = to_delete[i:i+100]
+                placeholders = ",".join("?" * len(batch))
+                self.conn.execute(
+                    f"DELETE FROM opportunities WHERE id IN ({placeholders})", batch
+                )
+            self.conn.commit()
+
+        return len(to_delete)
+
+    # --- App Settings (persisted in DB, survives container restarts) ---
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        row = self.conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", [key]
+        ).fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key: str, value: str):
+        self.conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            [key, value, datetime.now().isoformat()],
+        )
+        self.conn.commit()
+
+    def get_all_settings(self) -> dict:
+        rows = self.conn.execute("SELECT key, value FROM app_settings").fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def set_all_settings(self, settings: dict):
+        now = datetime.now().isoformat()
+        for key, value in settings.items():
+            self.conn.execute(
+                "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                [key, str(value), now],
+            )
+        self.conn.commit()
+
+    # --- Sheets export tracking (dedup) ---
+
+    def get_exported_keys(self) -> set:
+        """Get set of (source, source_id) tuples already exported to Sheets."""
+        rows = self.conn.execute("SELECT source, source_id FROM sheets_exports").fetchall()
+        return {(r[0], r[1]) for r in rows}
+
+    def mark_exported(self, keys: list):
+        """Mark (source, source_id) pairs as exported to Sheets."""
+        now = datetime.now().isoformat()
+        for source, source_id in keys:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO sheets_exports (source, source_id, exported_at) VALUES (?, ?, ?)",
+                [source, source_id, now],
+            )
         self.conn.commit()
 
     def close(self):
