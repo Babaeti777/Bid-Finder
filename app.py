@@ -11,6 +11,8 @@ import json
 import os
 import threading
 import time
+import csv
+import io
 import functools
 from datetime import datetime
 from pathlib import Path
@@ -323,6 +325,69 @@ def api_clear():
         db.close()
 
 
+@app.route("/api/export")
+@login_required
+def api_export():
+    """Export bids as CSV download."""
+    db = _get_db()
+    try:
+        min_score = int(request.args.get("min_score", 0))
+        bids = db.search(min_score=min_score, limit=5000)
+        if not bids:
+            return jsonify({"error": "No bids to export"}), 404
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "Score", "Status", "Title", "Source", "Project Type",
+            "Location", "Due Date", "Est. Value", "Agency/Contact",
+            "Set-Aside", "URL", "Keywords",
+        ])
+        for b in bids:
+            location = ", ".join(filter(None, [b.location_city, b.location_county, b.location_state]))
+            value = b.budget_display or ""
+            if not value and b.estimated_value_min:
+                value = f"${b.estimated_value_min:,.0f}-${b.estimated_value_max:,.0f}"
+            writer.writerow([
+                b.relevance_score, b.status, b.title,
+                SOURCES.get(b.source, {}).get("name", b.source),
+                b.project_type, location, b.due_date or "",
+                value, f"{b.agency_name} / {b.contact_name}".strip(" /"),
+                b.set_aside or "", b.source_url,
+                ", ".join(b.keyword_matches[:5]) if b.keyword_matches else "",
+            ])
+
+        filename = f"oak_bids_{datetime.now().strftime('%Y%m%d')}.csv"
+        return Response(
+            output.getvalue(),
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    finally:
+        db.close()
+
+
+@app.route("/api/email", methods=["POST"])
+@login_required
+def api_send_email():
+    """Send an email digest of recent bids."""
+    try:
+        from email_sender import EmailSender
+        db = _get_db()
+        try:
+            sender = EmailSender(db)
+            success = sender.send_digest()
+            if success:
+                return jsonify({"status": "sent"})
+            return jsonify({"error": "No credentials configured or no new bids to send. Check Settings."}), 400
+        finally:
+            db.close()
+    except ImportError as e:
+        return jsonify({"error": f"Email module error: {e}"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/status", methods=["POST"])
 @login_required
 def api_update_status():
@@ -571,6 +636,8 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;color:#333;min-h
     Run Scan Now
   </button>
   <button class="btn-run" style="background:#dc3545;margin-left:8px;font-size:0.85rem;padding:10px 16px" onclick="clearAndRescan()">Clear &amp; Rescan</button>
+  <button class="btn-run" style="background:#17a2b8;margin-left:8px;font-size:0.85rem;padding:10px 16px" onclick="exportCSV()">&#11123; Export CSV</button>
+  <button class="btn-run" style="background:#6f42c1;margin-left:8px;font-size:0.85rem;padding:10px 16px" onclick="sendEmail()">&#9993; Send Email</button>
   <div class="run-status" id="runStatus"></div>
 </div>
 
@@ -656,6 +723,31 @@ async function loadStats() {
   } catch(e) {}
 }
 
+// ---- Export CSV ----
+function exportCSV() {
+  const score = document.getElementById('filterScore').value || '0';
+  window.location.href = '/api/export?min_score=' + score;
+}
+
+// ---- Send Email ----
+async function sendEmail() {
+  const status = document.getElementById('runStatus');
+  status.textContent = 'Sending email digest...';
+  try {
+    const r = await fetch('/api/email', {method:'POST'});
+    const d = await r.json();
+    if (r.ok) {
+      status.textContent = 'Email sent successfully!';
+    } else {
+      status.textContent = 'Email failed: ' + (d.error || 'Unknown error');
+      status.className = 'run-status error';
+    }
+  } catch(e) {
+    status.textContent = 'Email failed: ' + e.message;
+    status.className = 'run-status error';
+  }
+}
+
 // ---- Clear & Rescan ----
 async function clearAndRescan() {
   if (!confirm('This will delete ALL current bid results and run a fresh scan. Continue?')) return;
@@ -731,8 +823,10 @@ function pollProgress() {
           status.className = 'run-status error';
         } else if (s.summary) {
           const sm = s.summary;
-          status.textContent = `Done! ${sm.total_found} bids found (${sm.new_opportunities} new) from ${sm.sources_searched.length} sources in ${(sm.run_date || '').split('T')[0] || 'today'}`;
-          if (sm.errors && sm.errors.length) status.textContent += ` | ${sm.errors.length} source errors`;
+          const errCount = (sm.errors && sm.errors.length) || 0;
+          status.textContent = `Done! ${sm.total_found} bids found (${sm.new_opportunities} new) from ${sm.sources_searched.length} sources`;
+          if (errCount) status.textContent += ` | ${errCount} errors`;
+          status.className = 'run-status';
         } else {
           status.textContent = 'Scan finished. Refresh to see results.';
         }
