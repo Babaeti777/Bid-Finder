@@ -29,7 +29,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24))
 
 DB_PATH = OUTPUT["database"]
-SETTINGS_FILE = Path(__file__).parent / "settings.json"
+SETTINGS_FILE = Path(__file__).parent / "settings.json"  # Legacy fallback
 
 # ============================================================
 # AUTHENTICATION (password-protect when hosted publicly)
@@ -114,20 +114,48 @@ DEFAULT_SETTINGS = {
 
 
 def load_settings() -> dict:
-    if SETTINGS_FILE.exists():
-        with open(SETTINGS_FILE) as f:
-            saved = json.load(f)
-        merged = {**DEFAULT_SETTINGS, **saved}
-        for key, default in DEFAULT_SETTINGS["paid_sources"].items():
-            if key not in merged.get("paid_sources", {}):
-                merged.setdefault("paid_sources", {})[key] = default
-        return merged
+    """Load settings from SQLite DB, falling back to settings.json for migration."""
+    db = _get_db()
+    try:
+        stored = db.get_setting("app_settings", "")
+        if stored:
+            saved = json.loads(stored)
+            merged = {**DEFAULT_SETTINGS, **saved}
+            for key, default in DEFAULT_SETTINGS["paid_sources"].items():
+                if key not in merged.get("paid_sources", {}):
+                    merged.setdefault("paid_sources", {})[key] = default
+            return merged
+
+        # Migrate from legacy settings.json if it exists
+        if SETTINGS_FILE.exists():
+            with open(SETTINGS_FILE) as f:
+                saved = json.load(f)
+            merged = {**DEFAULT_SETTINGS, **saved}
+            for key, default in DEFAULT_SETTINGS["paid_sources"].items():
+                if key not in merged.get("paid_sources", {}):
+                    merged.setdefault("paid_sources", {})[key] = default
+            # Migrate to DB
+            db.set_setting("app_settings", json.dumps(merged))
+            return merged
+    finally:
+        db.close()
+
     return DEFAULT_SETTINGS.copy()
 
 
 def save_settings(settings: dict):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f, indent=2)
+    """Save settings to SQLite DB (persists across Render container restarts)."""
+    db = _get_db()
+    try:
+        db.set_setting("app_settings", json.dumps(settings))
+    finally:
+        db.close()
+    # Also write to settings.json for config.py override to pick up
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(settings, f, indent=2)
+    except OSError:
+        pass
 
 
 def _get_db():
@@ -428,9 +456,56 @@ def manifest():
 @app.route("/sw.js")
 def service_worker():
     sw = """
-self.addEventListener('install', e => self.skipWaiting());
-self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
-self.addEventListener('fetch', e => e.respondWith(fetch(e.request).catch(() => caches.match(e.request))));
+const CACHE_NAME = 'bid-finder-v2';
+const STATIC_ASSETS = ['/', '/icon.svg', '/manifest.json'];
+
+self.addEventListener('install', e => {
+  e.waitUntil(
+    caches.open(CACHE_NAME)
+      .then(cache => cache.addAll(STATIC_ASSETS))
+      .then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener('activate', e => {
+  e.waitUntil(
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
+    ).then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', e => {
+  const url = new URL(e.request.url);
+  // API calls: network-first, fallback to cache
+  if (url.pathname.startsWith('/api/')) {
+    e.respondWith(
+      fetch(e.request)
+        .then(r => {
+          if (r.ok && e.request.method === 'GET') {
+            const rc = r.clone();
+            caches.open(CACHE_NAME).then(c => c.put(e.request, rc));
+          }
+          return r;
+        })
+        .catch(() => caches.match(e.request))
+    );
+    return;
+  }
+  // Static assets: cache-first, fallback to network
+  e.respondWith(
+    caches.match(e.request).then(cached => {
+      if (cached) return cached;
+      return fetch(e.request).then(r => {
+        if (r.ok) {
+          const rc = r.clone();
+          caches.open(CACHE_NAME).then(c => c.put(e.request, rc));
+        }
+        return r;
+      });
+    })
+  );
+});
 """
     return Response(sw.strip(), mimetype="application/javascript")
 
@@ -1002,7 +1077,31 @@ async function updateStatus(id, status) {
   } catch(e) { alert('Failed to update status'); }
 }
 
+// ---- Filter Persistence (localStorage) ----
+const FILTER_KEYS = ['filterType', 'filterStatus', 'filterScore', 'filterQ'];
+
+function saveFilters() {
+  const filters = {};
+  FILTER_KEYS.forEach(id => { filters[id] = document.getElementById(id).value; });
+  localStorage.setItem('bidFinderFilters', JSON.stringify(filters));
+}
+
+function restoreFilters() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('bidFinderFilters'));
+    if (!saved) return;
+    FILTER_KEYS.forEach(id => {
+      if (saved[id] !== undefined) document.getElementById(id).value = saved[id];
+    });
+  } catch(e) {}
+}
+
+// Wrap loadBids to auto-save filters
+const _origLoadBids = loadBids;
+loadBids = function() { saveFilters(); return _origLoadBids(); };
+
 // ---- Init ----
+restoreFilters();
 loadStats();
 loadBids();
 

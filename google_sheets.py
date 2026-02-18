@@ -68,6 +68,16 @@ class SheetsUpdater:
             print("[Sheets] No new opportunities to append.")
             return 0
 
+        # Filter out already-exported opportunities
+        exported_keys = self.db.get_exported_keys()
+        opportunities = [
+            opp for opp in opportunities
+            if (opp.source, opp.source_id) not in exported_keys
+        ]
+        if not opportunities:
+            print("[Sheets] All opportunities already exported. Skipping.")
+            return 0
+
         spreadsheet_name = os.environ.get(
             "GOOGLE_SHEET_NAME",
             self.config.get("spreadsheet_name", "OAK Builders - Bid Tracker"),
@@ -94,10 +104,11 @@ class SheetsUpdater:
             worksheet.insert_row(SHEET_HEADERS, index=1)
 
         # Build rows sorted by project type then score descending
-        rows = []
-        for opp in sorted(
+        sorted_opps = sorted(
             opportunities, key=lambda o: (o.project_type or "zzz", -o.relevance_score)
-        ):
+        )
+        rows = []
+        for opp in sorted_opps:
             location = ", ".join(filter(None, [
                 opp.location_city, opp.location_county, opp.location_state,
             ]))
@@ -126,5 +137,10 @@ class SheetsUpdater:
             ])
 
         worksheet.append_rows(rows, value_input_option="USER_ENTERED")
+
+        # Mark these as exported so they won't be re-appended next run
+        export_keys = [(opp.source, opp.source_id) for opp in sorted_opps]
+        self.db.mark_exported(export_keys)
+
         print(f"[Sheets] Appended {len(rows)} bids to '{spreadsheet_name}'.")
         return len(rows)

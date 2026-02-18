@@ -130,14 +130,19 @@ def run_scrapers(sources: list = None, db: BidDatabase = None, progress_callback
         if row_id > 0:
             new_count += 1
 
+    # Deduplicate cross-source entries
+    dedup_count = db.deduplicate()
+    if dedup_count:
+        print(f"    Removed {dedup_count} cross-source duplicates")
+
     # Count by type
     for opp in quality_results:
         ptype = opp.project_type or "unknown"
         summary["by_type"][ptype] = summary["by_type"].get(ptype, 0) + 1
 
     duration = time.time() - start_time
-    summary["total_found"] = len(quality_results)
-    summary["new_opportunities"] = new_count
+    summary["total_found"] = len(quality_results) - dedup_count
+    summary["new_opportunities"] = max(0, new_count - dedup_count)
 
     # Log the run
     db.log_search_run(
