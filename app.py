@@ -102,6 +102,8 @@ DEFAULT_SETTINGS = {
     "google_sheets_enabled": False,
     "google_sheet_name": "OAK Builders - Bid Tracker",
     "sam_gov_api_key": "",
+    "bidnet_email": "",
+    "bidnet_password": "",
     "paid_sources": {
         "dodge_construction": {"enabled": False, "username": "", "password": ""},
         "building_connected": {"enabled": False, "username": "", "password": ""},
@@ -228,6 +230,8 @@ def settings():
         s["google_sheets_enabled"] = "google_sheets_enabled" in request.form
         s["google_sheet_name"] = request.form.get("google_sheet_name", "").strip()
         s["sam_gov_api_key"] = request.form.get("sam_gov_api_key", "").strip()
+        s["bidnet_email"] = request.form.get("bidnet_email", "").strip()
+        s["bidnet_password"] = request.form.get("bidnet_password", "").strip()
         for key in s["paid_sources"]:
             s["paid_sources"][key] = {
                 "enabled": f"paid_{key}_enabled" in request.form,
@@ -1197,6 +1201,14 @@ button[type=submit]:hover{background:#245a36}
     <label>SAM.gov API Key (free)</label>
     <input type="text" name="sam_gov_api_key" value="{{ s.sam_gov_api_key }}" placeholder="Get free key at api.data.gov/signup">
     <p class="hint">Free API key from <a href="https://api.data.gov/signup/" target="_blank">api.data.gov/signup</a></p>
+  </div>
+  <div class="section">
+    <h2>BidNet Direct Login</h2>
+    <p class="hint">Authenticated access to BidNet Direct for full bid listings and documents.</p>
+    <label>Email</label>
+    <input type="email" name="bidnet_email" value="{{ s.bidnet_email }}" placeholder="your@email.com">
+    <label>Password</label>
+    <input type="password" name="bidnet_password" value="{{ s.bidnet_password }}" placeholder="BidNet password">
   </div>
   <div class="section">
     <h2>Data Sources</h2>

@@ -1126,9 +1126,15 @@ def load_settings_override():
             "google_sheet_name", GOOGLE_SHEETS["spreadsheet_name"]
         )
 
+    import os
+
     if s.get("sam_gov_api_key"):
-        import os
         os.environ.setdefault("SAM_GOV_API_KEY", s["sam_gov_api_key"])
+
+    if s.get("bidnet_email"):
+        os.environ.setdefault("BIDNET_EMAIL", s["bidnet_email"])
+    if s.get("bidnet_password"):
+        os.environ.setdefault("BIDNET_PASSWORD", s["bidnet_password"])
 
     for key, creds in s.get("paid_sources", {}).items():
         if key in SOURCES and creds.get("enabled"):

@@ -9,7 +9,8 @@ Scraper Status:
   CountyScraper     - Generic HTML scraper for county procurement pages
   PermitScraper     - Generic HTML scraper for building permit pages
 
-Sites requiring JavaScript (Bonfire, Ivalua, BidNet) are disabled in config.
+Sites requiring JavaScript (Bonfire, Ivalua) use CountyScraper as fallback.
+  BidNetScraper      - BidNet Direct with authenticated session login
 """
 
 import os
@@ -814,6 +815,251 @@ class PermitScraper(BaseScraper):
 
 
 # ============================================================
+# BIDNET DIRECT SCRAPER (Authenticated Session)
+# ============================================================
+
+class BidNetScraper(BaseScraper):
+    """
+    Scrapes BidNet Direct using authenticated session login.
+    Credentials: BIDNET_EMAIL / BIDNET_PASSWORD env vars, or via Settings page.
+    Login is required to access full bid listings and documents.
+    """
+
+    LOGIN_URL = "https://www.bidnetdirect.com/public/authentication/login"
+    BIDS_URL = "https://www.bidnetdirect.com/virginia/solicitations/open-bids"
+
+    def _login(self) -> bool:
+        """Authenticate with BidNet Direct. Returns True on success."""
+        email = os.environ.get("BIDNET_EMAIL", "")
+        password = os.environ.get("BIDNET_PASSWORD", "")
+
+        if not email or not password:
+            print("    [BidNet] No credentials found.")
+            print("    [BidNet] Set BIDNET_EMAIL and BIDNET_PASSWORD in Settings or env vars.")
+            return False
+
+        # Use realistic browser headers to avoid bot detection
+        self.session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+        })
+
+        # Step 1: GET login page to get session cookies and CSRF token
+        print("    [BidNet] Loading login page...")
+        try:
+            login_page = self.session.get(self.LOGIN_URL, timeout=20)
+            login_page.raise_for_status()
+        except Exception as e:
+            print(f"    [BidNet] Failed to load login page: {e}")
+            return False
+
+        # Extract CSRF token from the login form
+        soup = BeautifulSoup(login_page.text, "lxml")
+        csrf_token = ""
+        csrf_input = soup.select_one('input[name="_csrf"]') or soup.select_one('input[name="csrf"]')
+        if csrf_input:
+            csrf_token = csrf_input.get("value", "")
+
+        # Also check for meta tag CSRF
+        if not csrf_token:
+            csrf_meta = soup.select_one('meta[name="_csrf"]') or soup.select_one('meta[name="csrf-token"]')
+            if csrf_meta:
+                csrf_token = csrf_meta.get("content", "")
+
+        # Step 2: POST login credentials
+        print("    [BidNet] Submitting login...")
+        login_data = {
+            "email": email,
+            "password": password,
+        }
+        if csrf_token:
+            login_data["_csrf"] = csrf_token
+
+        try:
+            resp = self.session.post(
+                self.LOGIN_URL,
+                data=login_data,
+                timeout=20,
+                allow_redirects=True,
+            )
+            # Check if login succeeded (redirected away from login page, or got 200 on dashboard)
+            if "login" in resp.url.lower() and resp.status_code == 200:
+                # Still on login page — check for error messages
+                error_soup = BeautifulSoup(resp.text, "lxml")
+                error_msg = error_soup.select_one(".alert-danger, .error-message, .login-error")
+                if error_msg:
+                    print(f"    [BidNet] Login failed: {error_msg.get_text(strip=True)}")
+                else:
+                    print("    [BidNet] Login may have failed (still on login page)")
+                return False
+
+            print(f"    [BidNet] Login successful (redirected to {resp.url[:60]}...)")
+            return True
+
+        except Exception as e:
+            print(f"    [BidNet] Login request failed: {e}")
+            return False
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+
+        # Try authenticated access first
+        logged_in = self._login()
+        if not logged_in:
+            print("    [BidNet] Falling back to public page scraping...")
+
+        # Fetch open bids page (works with or without auth, but auth gives more data)
+        print(f"    [BidNet] Fetching open solicitations...")
+        try:
+            resp = self._fetch(self.BIDS_URL, timeout=20)
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 403:
+                print("    [BidNet] Access blocked (403). Site may require JavaScript.")
+                print("    [BidNet] Browse manually: https://www.bidnetdirect.com/virginia")
+                return []
+            raise
+
+        print(f"    [BidNet] Response: {resp.status_code}, size: {len(resp.text)} bytes")
+
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        # Remove navigation noise
+        for tag in soup.select("nav, header, footer, .nav, .header, .footer, .sidebar"):
+            tag.decompose()
+
+        # BidNet lists solicitations in table rows or div cards
+        # Strategy 1: Look for solicitation table rows
+        bid_rows = soup.select("table tr, .solicitation-row, .bid-item, .sol-item")
+        if not bid_rows:
+            # Strategy 2: Look for cards/divs with bid data
+            bid_rows = soup.select("div.row, div.card, div.item, article, li.list-group-item")
+
+        print(f"    [BidNet] Found {len(bid_rows)} potential listing elements")
+
+        for row in bid_rows:
+            try:
+                # Find the main link
+                link_tag = row.select_one("a[href]")
+                if not link_tag:
+                    continue
+
+                title = link_tag.get_text(strip=True)
+                href = link_tag.get("href", "")
+
+                if not title or len(title) < 10 or not self._is_valid_href(href):
+                    continue
+
+                # Get all text from the row for context
+                row_text = row.get_text(strip=True)
+                combined = f"{title} {row_text}"
+
+                # Skip navigation links
+                if any(p in title.lower() for p in CountyScraper._SKIP_PATTERNS):
+                    continue
+
+                # Filter: must be construction-related OR have bid indicators
+                is_bid = any(ind in combined.lower() for ind in CountyScraper._BID_INDICATORS)
+                is_construction = self._is_construction_related(combined)
+                if not is_bid and not is_construction:
+                    continue
+
+                detail_url = self._make_detail_url("https://www.bidnetdirect.com", href)
+                ptype, kw_matches = self._match_keywords(combined)
+                loc = self._match_location(combined)
+
+                # Try to extract closing date from the row
+                due_date = ""
+                date_match = re.search(
+                    r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', row_text
+                )
+                if date_match:
+                    due_date = date_match.group(1)
+
+                # Try to extract agency/org name
+                agency = ""
+                org_el = row.select_one(".org-name, .agency, .buyer-name, td:nth-of-type(2)")
+                if org_el and org_el != link_tag:
+                    agency = org_el.get_text(strip=True)
+
+                bid = BidOpportunity(
+                    title=title,
+                    source="bidnet_direct",
+                    source_url=detail_url,
+                    source_id=self._generate_source_id("bidnet", title, href),
+                    project_type=ptype,
+                    location_city=loc.get("city", ""),
+                    location_county=loc.get("county", ""),
+                    location_state=loc.get("state", "VA"),
+                    due_date=due_date,
+                    agency_name=agency,
+                    keyword_matches=kw_matches,
+                    scraped_at=datetime.now().isoformat(),
+                )
+                results.append(bid)
+
+            except Exception as e:
+                print(f"    [BidNet] Error parsing row: {e}")
+
+        # If no structured results, try the generic broad strategy
+        if not results:
+            print("    [BidNet] No structured bids found, trying broad link scan...")
+            listings = self._find_links_broad(soup)
+            for item in listings:
+                try:
+                    title = item["title"]
+                    href = item["href"]
+                    extra = item.get("extra_text", "")
+                    combined = f"{title} {extra}"
+
+                    if len(title) < 15:
+                        continue
+                    if any(p in title.lower() for p in CountyScraper._SKIP_PATTERNS):
+                        continue
+                    if not self._is_construction_related(combined):
+                        continue
+
+                    detail_url = self._make_detail_url("https://www.bidnetdirect.com", href)
+                    ptype, kw_matches = self._match_keywords(combined)
+
+                    bid = BidOpportunity(
+                        title=title,
+                        source="bidnet_direct",
+                        source_url=detail_url,
+                        source_id=self._generate_source_id("bidnet", title, href),
+                        project_type=ptype,
+                        location_state="VA",
+                        keyword_matches=kw_matches,
+                        scraped_at=datetime.now().isoformat(),
+                    )
+                    results.append(bid)
+                except Exception as e:
+                    print(f"    [BidNet] Error parsing listing: {e}")
+
+        if not results:
+            body = soup.get_text(strip=True)
+            if len(body) < 1000:
+                print("    [BidNet] Page has minimal content - may need JavaScript rendering.")
+            else:
+                print("    [BidNet] Page has content but no construction bids matched filters.")
+
+        print(f"    [BidNet] Construction-related results: {len(results)}")
+        self.results = results
+        return results
+
+
+# ============================================================
 # SCRAPER FACTORY
 # ============================================================
 
@@ -826,6 +1072,8 @@ def get_scraper(source_key: str, source_config: dict) -> BaseScraper:
         "montgomery_county": MontgomeryCountyScraper,
         # State portals
         "eva": EVAScraper,
+        # Authenticated scrapers
+        "bidnet_direct": BidNetScraper,
         # Permit scrapers
         "arlington_permits": PermitScraper,
         "fairfax_permits": PermitScraper,
