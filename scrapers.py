@@ -1060,6 +1060,333 @@ class BidNetScraper(BaseScraper):
 
 
 # ============================================================
+# OPENGOV PROCUREMENT SCRAPER (Authenticated Session)
+# ============================================================
+
+class OpenGovScraper(BaseScraper):
+    """
+    Scrapes OpenGov Procurement vendor portal.
+    Platform: procurement.opengov.com (React SPA)
+
+    Strategy:
+    1. Login via form POST to get session cookies
+    2. Hit internal API endpoints the React frontend uses
+    3. Fall back to embed pages for known agencies
+    4. Parse whatever HTML/JSON we can get
+
+    Credentials: OPENGOV_EMAIL / OPENGOV_PASSWORD env vars, or Settings page.
+    """
+
+    BASE = "https://procurement.opengov.com"
+    LOGIN_URL = "https://procurement.opengov.com/login"
+
+    # Vendor-specific open bids page (React SPA route)
+    VENDOR_ID = "410233"  # OAK Builders LLC vendor ID
+
+    # Known agencies in NOVA/DC/MD area that use OpenGov
+    EMBED_PORTALS = [
+        ("dc", "DC", "DC Dept of General Services"),
+    ]
+
+    def _get_browser_headers(self):
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                      "image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+        }
+
+    def _login(self) -> bool:
+        """Authenticate with OpenGov Procurement. Returns True on success."""
+        email = os.environ.get("OPENGOV_EMAIL", "")
+        password = os.environ.get("OPENGOV_PASSWORD", "")
+
+        if not email or not password:
+            print("    [OpenGov] No credentials found.")
+            print("    [OpenGov] Set OPENGOV_EMAIL and OPENGOV_PASSWORD in Settings or env vars.")
+            return False
+
+        self.session.headers.update(self._get_browser_headers())
+
+        # Step 1: GET login page for cookies/CSRF
+        print("    [OpenGov] Loading login page...")
+        try:
+            login_page = self.session.get(self.LOGIN_URL, timeout=20)
+        except Exception as e:
+            print(f"    [OpenGov] Failed to load login page: {e}")
+            return False
+
+        if login_page.status_code == 403:
+            print("    [OpenGov] Login page blocked (403). Site requires full browser.")
+            return False
+
+        # Extract CSRF token
+        soup = BeautifulSoup(login_page.text, "lxml")
+        csrf_token = ""
+        for selector in [
+            'input[name="_csrf"]', 'input[name="csrf"]',
+            'input[name="authenticity_token"]', 'input[name="_token"]',
+        ]:
+            el = soup.select_one(selector)
+            if el:
+                csrf_token = el.get("value", "")
+                break
+        if not csrf_token:
+            meta = soup.select_one('meta[name="csrf-token"]')
+            if meta:
+                csrf_token = meta.get("content", "")
+
+        # Step 2: POST login
+        print("    [OpenGov] Submitting login...")
+        login_data = {"email": email, "password": password}
+        if csrf_token:
+            login_data["_csrf"] = csrf_token
+            login_data["authenticity_token"] = csrf_token
+
+        # Try form POST first
+        self.session.headers.update({
+            "Referer": self.LOGIN_URL,
+            "Origin": self.BASE,
+        })
+
+        try:
+            resp = self.session.post(
+                self.LOGIN_URL,
+                data=login_data,
+                timeout=20,
+                allow_redirects=True,
+            )
+
+            if resp.status_code == 403:
+                print("    [OpenGov] Login POST blocked (403).")
+                # Try JSON login as alternative (many React SPAs use JSON auth)
+                return self._try_json_login(email, password)
+
+            if "login" in resp.url.lower() and resp.status_code == 200:
+                print("    [OpenGov] Login may have failed (still on login page).")
+                return self._try_json_login(email, password)
+
+            print(f"    [OpenGov] Login successful (redirected to {resp.url[:60]})")
+            return True
+
+        except Exception as e:
+            print(f"    [OpenGov] Login failed: {e}")
+            return False
+
+    def _try_json_login(self, email, password) -> bool:
+        """Try JSON-based login (common for React SPAs)."""
+        print("    [OpenGov] Trying JSON-based login...")
+
+        # Common API login endpoints for React apps
+        api_login_urls = [
+            f"{self.BASE}/api/auth/login",
+            f"{self.BASE}/api/v1/auth/login",
+            f"{self.BASE}/api/login",
+            f"{self.BASE}/auth/login",
+        ]
+
+        json_headers = {
+            **self._get_browser_headers(),
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        for url in api_login_urls:
+            try:
+                resp = self.session.post(
+                    url,
+                    json={"email": email, "password": password},
+                    headers=json_headers,
+                    timeout=15,
+                    allow_redirects=False,
+                )
+                if resp.status_code in (200, 201, 302):
+                    print(f"    [OpenGov] JSON login succeeded at {url}")
+                    return True
+                if resp.status_code == 403:
+                    continue  # Try next endpoint
+            except Exception:
+                continue
+
+        print("    [OpenGov] All login methods blocked. Site likely requires full browser.")
+        return False
+
+    def _scrape_embed_portal(self, org_slug, state, agency_name) -> List[BidOpportunity]:
+        """Try scraping an agency's embed portal page."""
+        results = []
+        url = f"{self.BASE}/portal/embed/{org_slug}/project-list?status=all"
+
+        try:
+            resp = self.session.get(url, timeout=20)
+            if resp.status_code == 403:
+                print(f"    [OpenGov] Embed page blocked for {org_slug}")
+                return []
+
+            soup = BeautifulSoup(resp.text, "lxml")
+            body_text = soup.get_text(strip=True)
+
+            if len(body_text) < 500:
+                print(f"    [OpenGov] {org_slug} embed is JS-only (minimal HTML)")
+                return []
+
+            # Try to find project/bid listings
+            listings = self._find_links_broad(soup)
+            print(f"    [OpenGov] {org_slug} embed: {len(listings)} links found")
+
+            for item in listings:
+                title = item["title"]
+                href = item["href"]
+                extra = item.get("extra_text", "")
+                combined = f"{title} {extra}"
+
+                if len(title) < 10:
+                    continue
+                if any(p in title.lower() for p in CountyScraper._SKIP_PATTERNS):
+                    continue
+                if not self._is_construction_related(combined):
+                    continue
+
+                detail_url = self._make_detail_url(self.BASE, href)
+                ptype, kw_matches = self._match_keywords(combined)
+
+                bid = BidOpportunity(
+                    title=title,
+                    source="opengov",
+                    source_url=detail_url,
+                    source_id=self._generate_source_id("opengov", org_slug, title),
+                    project_type=ptype,
+                    location_state=state,
+                    agency_name=agency_name,
+                    keyword_matches=kw_matches,
+                    scraped_at=datetime.now().isoformat(),
+                )
+                results.append(bid)
+
+        except Exception as e:
+            print(f"    [OpenGov] Error scraping {org_slug}: {e}")
+
+        return results
+
+    def _scrape_vendor_page(self) -> List[BidOpportunity]:
+        """Try scraping the authenticated vendor open-bids page."""
+        results = []
+        url = (
+            f"{self.BASE}/vendors/{self.VENDOR_ID}/open-bids"
+            f"?states=VA%2CDC%2CMD"
+        )
+
+        print(f"    [OpenGov] Fetching vendor bids page...")
+        try:
+            resp = self.session.get(url, timeout=20)
+        except Exception as e:
+            print(f"    [OpenGov] Failed to fetch vendor page: {e}")
+            return []
+
+        if resp.status_code == 403:
+            print("    [OpenGov] Vendor page blocked (403)")
+            return []
+
+        print(f"    [OpenGov] Vendor page: {resp.status_code}, {len(resp.text)} bytes")
+
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        # Remove nav noise
+        for tag in soup.select("nav, header, footer, .nav, .sidebar"):
+            tag.decompose()
+
+        # Try to find bid/project listings (React may have server-rendered some content)
+        listings = self._find_links_broad(soup)
+        print(f"    [OpenGov] Found {len(listings)} links on vendor page")
+
+        for item in listings:
+            try:
+                title = item["title"]
+                href = item["href"]
+                extra = item.get("extra_text", "")
+                combined = f"{title} {extra}"
+
+                if len(title) < 10:
+                    continue
+                if any(p in title.lower() for p in CountyScraper._SKIP_PATTERNS):
+                    continue
+
+                is_bid = any(ind in combined.lower() for ind in CountyScraper._BID_INDICATORS)
+                is_construction = self._is_construction_related(combined)
+                if not is_bid and not is_construction:
+                    continue
+
+                detail_url = self._make_detail_url(self.BASE, href)
+                ptype, kw_matches = self._match_keywords(combined)
+                loc = self._match_location(combined)
+
+                due_date = ""
+                date_match = re.search(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', extra)
+                if date_match:
+                    due_date = date_match.group(1)
+
+                bid = BidOpportunity(
+                    title=title,
+                    source="opengov",
+                    source_url=detail_url,
+                    source_id=self._generate_source_id("opengov", title, href),
+                    project_type=ptype,
+                    location_city=loc.get("city", ""),
+                    location_county=loc.get("county", ""),
+                    location_state=loc.get("state", "VA"),
+                    due_date=due_date,
+                    keyword_matches=kw_matches,
+                    scraped_at=datetime.now().isoformat(),
+                )
+                results.append(bid)
+            except Exception as e:
+                print(f"    [OpenGov] Error parsing listing: {e}")
+
+        return results
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+
+        logged_in = self._login()
+
+        # Strategy 1: Authenticated vendor bids page
+        if logged_in:
+            vendor_results = self._scrape_vendor_page()
+            results.extend(vendor_results)
+            if vendor_results:
+                print(f"    [OpenGov] Got {len(vendor_results)} from vendor page")
+
+        # Strategy 2: Embed portals for known agencies
+        for org_slug, state, agency in self.EMBED_PORTALS:
+            embed_results = self._scrape_embed_portal(org_slug, state, agency)
+            results.extend(embed_results)
+
+        if not results:
+            if not logged_in:
+                print("    [OpenGov] No results. Login required — enter credentials in Settings.")
+            else:
+                print("    [OpenGov] No construction bids found. Site is a React SPA;")
+                print("    [OpenGov] data may require JavaScript rendering (Selenium).")
+            print(f"    [OpenGov] Browse manually: {self.BASE}/vendors/{self.VENDOR_ID}/open-bids?states=VA,DC,MD")
+
+        print(f"    [OpenGov] Total results: {len(results)}")
+        self.results = results
+        return results
+
+
+# ============================================================
 # SCRAPER FACTORY
 # ============================================================
 
@@ -1074,6 +1401,7 @@ def get_scraper(source_key: str, source_config: dict) -> BaseScraper:
         "eva": EVAScraper,
         # Authenticated scrapers
         "bidnet_direct": BidNetScraper,
+        "opengov": OpenGovScraper,
         # Permit scrapers
         "arlington_permits": PermitScraper,
         "fairfax_permits": PermitScraper,

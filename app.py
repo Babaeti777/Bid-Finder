@@ -104,6 +104,8 @@ DEFAULT_SETTINGS = {
     "sam_gov_api_key": "",
     "bidnet_email": "",
     "bidnet_password": "",
+    "opengov_email": "",
+    "opengov_password": "",
     "paid_sources": {
         "dodge_construction": {"enabled": False, "username": "", "password": ""},
         "building_connected": {"enabled": False, "username": "", "password": ""},
@@ -232,6 +234,8 @@ def settings():
         s["sam_gov_api_key"] = request.form.get("sam_gov_api_key", "").strip()
         s["bidnet_email"] = request.form.get("bidnet_email", "").strip()
         s["bidnet_password"] = request.form.get("bidnet_password", "").strip()
+        s["opengov_email"] = request.form.get("opengov_email", "").strip()
+        s["opengov_password"] = request.form.get("opengov_password", "").strip()
         for key in s["paid_sources"]:
             s["paid_sources"][key] = {
                 "enabled": f"paid_{key}_enabled" in request.form,
@@ -1209,6 +1213,14 @@ button[type=submit]:hover{background:#245a36}
     <input type="email" name="bidnet_email" value="{{ s.bidnet_email }}" placeholder="your@email.com">
     <label>Password</label>
     <input type="password" name="bidnet_password" value="{{ s.bidnet_password }}" placeholder="BidNet password">
+  </div>
+  <div class="section">
+    <h2>OpenGov Procurement Login</h2>
+    <p class="hint">Authenticated access to OpenGov Procurement for VA/DC/MD bid listings.</p>
+    <label>Email</label>
+    <input type="email" name="opengov_email" value="{{ s.opengov_email }}" placeholder="your@email.com">
+    <label>Password</label>
+    <input type="password" name="opengov_password" value="{{ s.opengov_password }}" placeholder="OpenGov password">
   </div>
   <div class="section">
     <h2>Data Sources</h2>

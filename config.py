@@ -978,6 +978,14 @@ SOURCES = {
     # ==========================================================
     # TIER 8 — Aggregator / SPA sites (may need JS)
     # ==========================================================
+    "opengov": {
+        "name": "OpenGov Procurement (VA/DC/MD)",
+        "base_url": "https://procurement.opengov.com/vendors/410233/open-bids?states=VA%2CDC%2CMD",
+        "enabled": True,
+        "type": "government",
+        "cost": "free",
+        "state": "VA",  # Multi-state (VA/DC/MD) handled internally
+    },
     "emma_maryland": {
         "name": "eMarylandMarketplace (eMMA)",
         "base_url": "https://emma.maryland.gov/page.aspx/en/rfp/request_browse_public",
@@ -1135,6 +1143,11 @@ def load_settings_override():
         os.environ.setdefault("BIDNET_EMAIL", s["bidnet_email"])
     if s.get("bidnet_password"):
         os.environ.setdefault("BIDNET_PASSWORD", s["bidnet_password"])
+
+    if s.get("opengov_email"):
+        os.environ.setdefault("OPENGOV_EMAIL", s["opengov_email"])
+    if s.get("opengov_password"):
+        os.environ.setdefault("OPENGOV_PASSWORD", s["opengov_password"])
 
     for key, creds in s.get("paid_sources", {}).items():
         if key in SOURCES and creds.get("enabled"):
