@@ -102,6 +102,10 @@ DEFAULT_SETTINGS = {
     "google_sheets_enabled": False,
     "google_sheet_name": "OAK Builders - Bid Tracker",
     "sam_gov_api_key": "",
+    "bidnet_email": "",
+    "bidnet_password": "",
+    "opengov_email": "",
+    "opengov_password": "",
     "paid_sources": {
         "dodge_construction": {"enabled": False, "username": "", "password": ""},
         "building_connected": {"enabled": False, "username": "", "password": ""},
@@ -228,6 +232,10 @@ def settings():
         s["google_sheets_enabled"] = "google_sheets_enabled" in request.form
         s["google_sheet_name"] = request.form.get("google_sheet_name", "").strip()
         s["sam_gov_api_key"] = request.form.get("sam_gov_api_key", "").strip()
+        s["bidnet_email"] = request.form.get("bidnet_email", "").strip()
+        s["bidnet_password"] = request.form.get("bidnet_password", "").strip()
+        s["opengov_email"] = request.form.get("opengov_email", "").strip()
+        s["opengov_password"] = request.form.get("opengov_password", "").strip()
         for key in s["paid_sources"]:
             s["paid_sources"][key] = {
                 "enabled": f"paid_{key}_enabled" in request.form,
@@ -456,8 +464,8 @@ def manifest():
 @app.route("/sw.js")
 def service_worker():
     sw = """
-const CACHE_NAME = 'bid-finder-v2';
-const STATIC_ASSETS = ['/', '/icon.svg', '/manifest.json'];
+const CACHE_NAME = 'bid-finder-v3';
+const STATIC_ASSETS = ['/icon.svg', '/manifest.json'];
 
 self.addEventListener('install', e => {
   e.waitUntil(
@@ -476,13 +484,20 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
+  // Only handle GET requests from same origin
+  if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
+  if (url.origin !== self.location.origin) return;
+
+  // Never intercept navigation requests (pages) — let browser handle redirects
+  if (e.request.mode === 'navigate') return;
+
   // API calls: network-first, fallback to cache
   if (url.pathname.startsWith('/api/')) {
     e.respondWith(
       fetch(e.request)
         .then(r => {
-          if (r.ok && e.request.method === 'GET') {
+          if (r.ok && !r.redirected && r.type === 'basic') {
             const rc = r.clone();
             caches.open(CACHE_NAME).then(c => c.put(e.request, rc));
           }
@@ -497,7 +512,7 @@ self.addEventListener('fetch', e => {
     caches.match(e.request).then(cached => {
       if (cached) return cached;
       return fetch(e.request).then(r => {
-        if (r.ok) {
+        if (r.ok && !r.redirected && r.type === 'basic') {
           const rc = r.clone();
           caches.open(CACHE_NAME).then(c => c.put(e.request, rc));
         }
@@ -1197,6 +1212,22 @@ button[type=submit]:hover{background:#245a36}
     <label>SAM.gov API Key (free)</label>
     <input type="text" name="sam_gov_api_key" value="{{ s.sam_gov_api_key }}" placeholder="Get free key at api.data.gov/signup">
     <p class="hint">Free API key from <a href="https://api.data.gov/signup/" target="_blank">api.data.gov/signup</a></p>
+  </div>
+  <div class="section">
+    <h2>BidNet Direct Login</h2>
+    <p class="hint">Authenticated access to BidNet Direct for full bid listings and documents.</p>
+    <label>Email</label>
+    <input type="email" name="bidnet_email" value="{{ s.bidnet_email }}" placeholder="your@email.com">
+    <label>Password</label>
+    <input type="password" name="bidnet_password" value="{{ s.bidnet_password }}" placeholder="BidNet password">
+  </div>
+  <div class="section">
+    <h2>OpenGov Procurement Login</h2>
+    <p class="hint">Authenticated access to OpenGov Procurement for VA/DC/MD bid listings.</p>
+    <label>Email</label>
+    <input type="email" name="opengov_email" value="{{ s.opengov_email }}" placeholder="your@email.com">
+    <label>Password</label>
+    <input type="password" name="opengov_password" value="{{ s.opengov_password }}" placeholder="OpenGov password">
   </div>
   <div class="section">
     <h2>Data Sources</h2>
