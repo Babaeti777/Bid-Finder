@@ -464,8 +464,8 @@ def manifest():
 @app.route("/sw.js")
 def service_worker():
     sw = """
-const CACHE_NAME = 'bid-finder-v2';
-const STATIC_ASSETS = ['/', '/icon.svg', '/manifest.json'];
+const CACHE_NAME = 'bid-finder-v3';
+const STATIC_ASSETS = ['/icon.svg', '/manifest.json'];
 
 self.addEventListener('install', e => {
   e.waitUntil(
@@ -484,13 +484,20 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
+  // Only handle GET requests from same origin
+  if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
+  if (url.origin !== self.location.origin) return;
+
+  // Never intercept navigation requests (pages) — let browser handle redirects
+  if (e.request.mode === 'navigate') return;
+
   // API calls: network-first, fallback to cache
   if (url.pathname.startsWith('/api/')) {
     e.respondWith(
       fetch(e.request)
         .then(r => {
-          if (r.ok && e.request.method === 'GET') {
+          if (r.ok && !r.redirected && r.type === 'basic') {
             const rc = r.clone();
             caches.open(CACHE_NAME).then(c => c.put(e.request, rc));
           }
@@ -505,7 +512,7 @@ self.addEventListener('fetch', e => {
     caches.match(e.request).then(cached => {
       if (cached) return cached;
       return fetch(e.request).then(r => {
-        if (r.ok) {
+        if (r.ok && !r.redirected && r.type === 'basic') {
           const rc = r.clone();
           caches.open(CACHE_NAME).then(c => c.put(e.request, rc));
         }
