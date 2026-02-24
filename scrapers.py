@@ -628,6 +628,17 @@ class CountyScraper(BaseScraper):
         "vendor registration", "vendor self-service",
         "copyright", "powered by", "all rights reserved",
         "share this", "print this", "email this",
+        # Section headers that are NOT actual bids
+        "awarded bids", "current bids", "closed bids", "open bids",
+        "bid opening", "bid results", "bid tabulation",
+        "bid opportunities", "archived bids", "expired bids",
+        "past bids", "active bids", "upcoming bids",
+        "collaboration portal", "procurement portal",
+        "vendor portal", "supplier portal", "bidder portal",
+        "formal solicitations", "informal solicitations",
+        "results and awards", "award results",
+        "how to bid", "bidding process",
+        "procurement home", "purchasing home",
     ]
 
     # Patterns that strongly indicate a real bid/solicitation listing
@@ -637,30 +648,41 @@ class CountyScraper(BaseScraper):
         "request for quote", "request for qualification",
     ]
 
+    # Titles that are just section headers, not real listings
+    _SECTION_HEADER_PATTERNS = re.compile(
+        r'^(?:awarded|current|closed|open|active|past|archived|expired|upcoming)\s+bids?$'
+        r'|^bid\s+(?:opening|results?|tabulation|opportunities|list)',
+        re.IGNORECASE,
+    )
+
     def _looks_like_bid_listing(self, title, combined):
         """Check if a link looks like an actual bid/solicitation listing."""
         title_lower = title.lower()
         combined_lower = combined.lower()
 
-        # Strong signal: contains a bid indicator keyword
-        if any(ind in combined_lower for ind in self._BID_INDICATORS):
+        # Reject known section header patterns (e.g. "Awarded Bids", "Current Bids")
+        if self._SECTION_HEADER_PATTERNS.search(title):
+            return False
+
+        # Strong signal: bid indicator in the TITLE itself (not just surrounding page text)
+        if any(ind in title_lower for ind in self._BID_INDICATORS):
             return True
 
-        # Strong signal: has a solicitation number pattern
+        # Strong signal: has a solicitation number pattern in TITLE
         # e.g. "IFB-2024-001", "RFP 24-12", "Bid #2024-0042", "Sol. 25-001"
-        if re.search(r'(?:IFB|RFP|RFQ|ITB|SOL|BID)[\s#.-]*\d', combined, re.IGNORECASE):
+        if re.search(r'(?:IFB|RFP|RFQ|ITB|SOL|BID)[\s#.-]*\d', title, re.IGNORECASE):
             return True
 
-        # Strong signal: has a reference number like "24-0012" or "#2024-042"
-        if re.search(r'#?\d{2,4}[-]\d{2,}', combined):
+        # Strong signal: has a reference number like "24-0012" or "#2024-042" or "PC #194-18537"
+        if re.search(r'#?\d{2,4}[-]\d{2,}', title):
             return True
 
         # Medium signal: construction-related AND substantive title (not just a nav link)
         if len(title) >= 25 and self._is_construction_related(combined):
             return True
 
-        # Medium signal: title contains "bid" as a whole word (not "forbid", "morbid")
-        if re.search(r'\bbids?\b', title_lower):
+        # Weak signal: title contains "bid" + is long enough to be a real listing
+        if len(title) >= 30 and re.search(r'\bbids?\b', title_lower):
             return True
 
         return False
