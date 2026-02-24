@@ -33,6 +33,22 @@ except ImportError:
 from models import BidOpportunity
 from config import KEYWORDS, LOCATIONS, COMPANY, SCRAPER_FILTER_TERMS
 
+# Optional: Playwright for JS-rendered sites
+try:
+    from browser import browser_fetch, browser_fetch_with_login, is_browser_available
+    HAS_BROWSER = is_browser_available()
+except ImportError:
+    HAS_BROWSER = False
+
+    def browser_fetch(*a, **kw):
+        raise RuntimeError("Playwright not installed")
+
+    def browser_fetch_with_login(*a, **kw):
+        raise RuntimeError("Playwright not installed")
+
+    def is_browser_available():
+        return False
+
 
 # ============================================================
 # BASE SCRAPER
@@ -71,6 +87,40 @@ class BaseScraper(ABC):
         resp = self.session.get(url, params=params, timeout=timeout)
         resp.raise_for_status()
         return resp
+
+    def _fetch_with_browser(self, url, wait_for=None):
+        """Fetch a URL using headless Chromium. Returns BeautifulSoup object.
+        Raises RuntimeError if Playwright is not installed."""
+        if not HAS_BROWSER:
+            raise RuntimeError("Playwright not available")
+        print(f"    [Browser] Rendering {url[:80]}...")
+        html = browser_fetch(url, wait_for=wait_for)
+        print(f"    [Browser] Got {len(html)} bytes of rendered HTML")
+        return BeautifulSoup(html, "lxml")
+
+    def _fetch_smart(self, url, params=None, wait_for=None):
+        """Try requests first, fall back to browser on 403/empty response.
+        Returns (BeautifulSoup, was_browser_used)."""
+        try:
+            resp = self._fetch(url, params=params)
+            soup = BeautifulSoup(resp.text, "lxml")
+            # Check if response is a JS shell (minimal HTML with no real content)
+            body_text = soup.get_text(strip=True)
+            if len(body_text) > 500:
+                return soup, False
+            # Too little content — probably an SPA shell
+            if HAS_BROWSER:
+                print(f"    [Smart] Page has only {len(body_text)} chars of text, trying browser...")
+                soup = self._fetch_with_browser(url, wait_for=wait_for)
+                return soup, True
+            return soup, False
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code if e.response is not None else 0
+            if code == 403 and HAS_BROWSER:
+                print(f"    [Smart] Got 403, trying browser...")
+                soup = self._fetch_with_browser(url, wait_for=wait_for)
+                return soup, True
+            raise
 
     def _generate_source_id(self, *parts):
         """Generate a unique source_id from parts of the listing."""
@@ -539,13 +589,12 @@ class EVAScraper(BaseScraper):
         results = []
         base_url = self.config.get("base_url")
 
-        # Try with construction category filter
-        params = {"status": "Open"}
+        # eVA is a JSP page that may need JS rendering
         print(f"    [eVA] Fetching {base_url}...")
-        resp = self._fetch(base_url, params=params)
-        print(f"    [eVA] Response: {resp.status_code}, size: {len(resp.text)} bytes")
-
-        soup = BeautifulSoup(resp.text, "lxml")
+        full_url = f"{base_url}?status=Open"
+        soup, used_browser = self._fetch_smart(full_url)
+        if used_browser:
+            print(f"    [eVA] Rendered with browser")
 
         # eVA uses JSP pages - try multiple parsing strategies
         listings = self._find_links_broad(soup)
@@ -693,10 +742,9 @@ class CountyScraper(BaseScraper):
         name = self.config.get("name", self.source_key)
 
         print(f"    [{name}] Fetching {base_url}...")
-        resp = self._fetch(base_url)
-        print(f"    [{name}] Response: {resp.status_code}, size: {len(resp.text)} bytes")
-
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup, used_browser = self._fetch_smart(base_url)
+        if used_browser:
+            print(f"    [{name}] Rendered with browser")
 
         # Remove nav, header, footer, sidebar to reduce noise
         for tag in soup.select(
@@ -778,10 +826,9 @@ class PermitScraper(BaseScraper):
         name = self.config.get("name", self.source_key)
 
         print(f"    [{name}] Fetching {base_url}...")
-        resp = self._fetch(base_url)
-        print(f"    [{name}] Response: {resp.status_code}, size: {len(resp.text)} bytes")
-
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup, used_browser = self._fetch_smart(base_url)
+        if used_browser:
+            print(f"    [{name}] Rendered with browser")
 
         # Look for tables with permit data
         commercial_terms = [
@@ -937,25 +984,50 @@ class BidNetScraper(BaseScraper):
     def scrape(self) -> List[BidOpportunity]:
         results = []
 
-        # Try authenticated access first
-        logged_in = self._login()
-        if not logged_in:
-            print("    [BidNet] Falling back to public page scraping...")
+        email = os.environ.get("BIDNET_EMAIL", "")
+        password = os.environ.get("BIDNET_PASSWORD", "")
 
-        # Fetch open bids page (works with or without auth, but auth gives more data)
-        print(f"    [BidNet] Fetching open solicitations...")
-        try:
-            resp = self._fetch(self.BIDS_URL, timeout=20)
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 403:
-                print("    [BidNet] Access blocked (403). Site may require JavaScript.")
-                print("    [BidNet] Browse manually: https://www.bidnetdirect.com/virginia")
-                return []
-            raise
+        # Strategy 1: Use browser with login (best results)
+        if HAS_BROWSER and email and password:
+            print("    [BidNet] Using browser with login...")
+            try:
+                html = browser_fetch_with_login(
+                    login_url=self.LOGIN_URL,
+                    target_url=self.BIDS_URL,
+                    email=email,
+                    password=password,
+                )
+                soup = BeautifulSoup(html, "lxml")
+                print(f"    [BidNet] Browser rendered {len(html)} bytes")
+            except Exception as e:
+                print(f"    [BidNet] Browser login failed: {e}")
+                soup = None
+        # Strategy 2: Use browser without login (public page)
+        elif HAS_BROWSER:
+            print("    [BidNet] Using browser (no credentials)...")
+            try:
+                soup = self._fetch_with_browser(self.BIDS_URL)
+            except Exception as e:
+                print(f"    [BidNet] Browser fetch failed: {e}")
+                soup = None
+        else:
+            soup = None
 
-        print(f"    [BidNet] Response: {resp.status_code}, size: {len(resp.text)} bytes")
-
-        soup = BeautifulSoup(resp.text, "lxml")
+        # Strategy 3: Fall back to requests
+        if soup is None:
+            logged_in = self._login()
+            if not logged_in:
+                print("    [BidNet] Falling back to public page scraping...")
+            print(f"    [BidNet] Fetching open solicitations...")
+            try:
+                resp = self._fetch(self.BIDS_URL, timeout=20)
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 403:
+                    print("    [BidNet] Access blocked (403). Needs browser or credentials.")
+                    return []
+                raise
+            print(f"    [BidNet] Response: {resp.status_code}, size: {len(resp.text)} bytes")
+            soup = BeautifulSoup(resp.text, "lxml")
 
         # Remove navigation noise
         for tag in soup.select("nav, header, footer, .nav, .header, .footer, .sidebar"):
@@ -1381,27 +1453,93 @@ class OpenGovScraper(BaseScraper):
     def scrape(self) -> List[BidOpportunity]:
         results = []
 
-        logged_in = self._login()
+        email = os.environ.get("OPENGOV_EMAIL", "")
+        password = os.environ.get("OPENGOV_PASSWORD", "")
+        vendor_url = (
+            f"{self.BASE}/vendors/{self.VENDOR_ID}/open-bids"
+            f"?states=VA%2CDC%2CMD"
+        )
 
-        # Strategy 1: Authenticated vendor bids page
+        # Strategy 1: Browser with login (best — renders the React SPA)
+        if HAS_BROWSER and email and password:
+            print("    [OpenGov] Using browser with login...")
+            try:
+                html = browser_fetch_with_login(
+                    login_url=self.LOGIN_URL,
+                    target_url=vendor_url,
+                    email=email,
+                    password=password,
+                )
+                soup = BeautifulSoup(html, "lxml")
+                print(f"    [OpenGov] Browser rendered {len(html)} bytes")
+
+                # Remove nav noise
+                for tag in soup.select("nav, header, footer, .nav, .sidebar"):
+                    tag.decompose()
+
+                listings = self._find_links_broad(soup)
+                print(f"    [OpenGov] Found {len(listings)} links on vendor page")
+
+                for item in listings:
+                    try:
+                        title = item["title"]
+                        href = item["href"]
+                        extra = item.get("extra_text", "")
+                        combined = f"{title} {extra}"
+
+                        if len(title) < 10:
+                            continue
+                        if any(p in title.lower() for p in CountyScraper._SKIP_PATTERNS):
+                            continue
+
+                        is_bid = any(ind in combined.lower() for ind in CountyScraper._BID_INDICATORS)
+                        is_construction = self._is_construction_related(combined)
+                        if not is_bid and not is_construction:
+                            continue
+
+                        detail_url = self._make_detail_url(self.BASE, href)
+                        ptype, kw_matches = self._match_keywords(combined)
+                        loc = self._match_location(combined)
+
+                        bid = BidOpportunity(
+                            title=title,
+                            source="opengov",
+                            source_url=detail_url,
+                            source_id=self._generate_source_id("opengov", title, href),
+                            project_type=ptype,
+                            location_city=loc.get("city", ""),
+                            location_county=loc.get("county", ""),
+                            location_state=loc.get("state", "VA"),
+                            keyword_matches=kw_matches,
+                            scraped_at=datetime.now().isoformat(),
+                        )
+                        results.append(bid)
+                    except Exception as e:
+                        print(f"    [OpenGov] Error parsing listing: {e}")
+
+                if results:
+                    print(f"    [OpenGov] Got {len(results)} from browser")
+                    self.results = results
+                    return results
+            except Exception as e:
+                print(f"    [OpenGov] Browser login failed: {e}")
+
+        # Strategy 2: requests-based login (fallback)
+        logged_in = self._login()
         if logged_in:
             vendor_results = self._scrape_vendor_page()
             results.extend(vendor_results)
-            if vendor_results:
-                print(f"    [OpenGov] Got {len(vendor_results)} from vendor page")
 
-        # Strategy 2: Embed portals for known agencies
+        # Strategy 3: Embed portals for known agencies
         for org_slug, state, agency in self.EMBED_PORTALS:
             embed_results = self._scrape_embed_portal(org_slug, state, agency)
             results.extend(embed_results)
 
         if not results:
-            if not logged_in:
-                print("    [OpenGov] No results. Login required — enter credentials in Settings.")
-            else:
-                print("    [OpenGov] No construction bids found. Site is a React SPA;")
-                print("    [OpenGov] data may require JavaScript rendering (Selenium).")
-            print(f"    [OpenGov] Browse manually: {self.BASE}/vendors/{self.VENDOR_ID}/open-bids?states=VA,DC,MD")
+            print("    [OpenGov] No results found.")
+            if not HAS_BROWSER:
+                print("    [OpenGov] Install Playwright for browser-based scraping.")
+            print(f"    [OpenGov] Browse manually: {vendor_url}")
 
         print(f"    [OpenGov] Total results: {len(results)}")
         self.results = results

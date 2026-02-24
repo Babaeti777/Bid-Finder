@@ -3,7 +3,7 @@ services:
     name: oak-bid-finder
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && (playwright install chromium --with-deps || echo "Playwright install skipped - browser scraping disabled on this tier")
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
     envVars:
       - key: PYTHON_VERSION

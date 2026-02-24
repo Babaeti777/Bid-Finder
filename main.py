@@ -111,7 +111,7 @@ def run_scrapers(sources: list = None, db: BidDatabase = None, progress_callback
         if source_config.get("enabled", False):
             enabled_sources.append((source_key, source_config))
 
-    MAX_TOTAL_SECONDS = 420  # Hard cap: entire scan stops after 7 minutes (~60 sources)
+    MAX_TOTAL_SECONDS = 900  # Hard cap: 15 min (browser-based scraping takes longer)
 
     for i, (source_key, source_config) in enumerate(enabled_sources, 1):
         # Abort if total scan time exceeded
