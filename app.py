@@ -914,8 +914,32 @@ function pollProgress() {
         } else if (s.summary) {
           const sm = s.summary;
           const errCount = (sm.errors && sm.errors.length) || 0;
-          status.textContent = `Done! ${sm.total_found} bids found (${sm.new_opportunities} new) from ${sm.sources_searched.length} sources`;
-          if (errCount) status.textContent += ` | ${errCount} errors`;
+          const srcCount = sm.sources_searched ? sm.sources_searched.length : 0;
+          const okCount = srcCount - errCount;
+          let msg = `Done! ${sm.total_found} bids found (${sm.new_opportunities} new) from ${okCount} of ${srcCount} sources`;
+          if (errCount) msg += ` (${errCount} unavailable)`;
+          status.innerHTML = msg;
+          if (errCount && sm.errors) {
+            const detailBtn = document.createElement('a');
+            detailBtn.href = '#';
+            detailBtn.style.cssText = 'margin-left:8px;font-size:0.85em;color:#666;';
+            detailBtn.textContent = '[view details]';
+            detailBtn.onclick = (e) => {
+              e.preventDefault();
+              const existing = document.getElementById('errorDetails');
+              if (existing) { existing.remove(); return; }
+              const div = document.createElement('div');
+              div.id = 'errorDetails';
+              div.style.cssText = 'margin-top:10px;padding:12px;background:#fff8f0;border:1px solid #f0c0a0;border-radius:6px;font-size:0.82em;max-height:200px;overflow-y:auto;text-align:left;';
+              div.innerHTML = '<b>Unavailable sources:</b><br>' +
+                sm.errors.map(e => {
+                  const short = e.length > 120 ? e.substring(0,120) + '...' : e;
+                  return '• ' + short.replace(/</g,'&lt;');
+                }).join('<br>');
+              status.parentElement.appendChild(div);
+            };
+            status.appendChild(detailBtn);
+          }
           status.className = 'run-status';
         } else {
           status.textContent = 'Scan finished. Refresh to see results.';
