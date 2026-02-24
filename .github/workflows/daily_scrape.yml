@@ -13,7 +13,7 @@ env:
 jobs:
   scrape-and-notify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - name: Checkout repository
@@ -27,6 +27,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: playwright install chromium --with-deps
 
       - name: Download previous database
         uses: dawidd6/action-download-artifact@v3
@@ -44,6 +47,10 @@ jobs:
           EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
+          BIDNET_EMAIL: ${{ secrets.BIDNET_EMAIL }}
+          BIDNET_PASSWORD: ${{ secrets.BIDNET_PASSWORD }}
+          OPENGOV_EMAIL: ${{ secrets.OPENGOV_EMAIL }}
+          OPENGOV_PASSWORD: ${{ secrets.OPENGOV_PASSWORD }}
         run: python main.py --cloud
 
       - name: Upload database artifact

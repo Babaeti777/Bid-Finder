@@ -25,22 +25,46 @@ from scrapers import get_scraper
 from scorer import score_opportunities
 
 
-def _run_scraper_with_retry(source_key, source_config, max_retries=2, backoff=2):
+def _run_scraper_with_retry(source_key, source_config, max_retries=1, backoff=2):
     """Run a single scraper with retry logic. Returns (results, error_msg_or_None)."""
+    import requests as _req
+
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
             scraper = get_scraper(source_key, source_config)
             results = scraper.scrape()
             return results, None
+        except _req.exceptions.HTTPError as e:
+            code = e.response.status_code if e.response is not None else 0
+            # Don't retry 403/401 — site is blocking us
+            if code in (401, 403):
+                return [], f"{source_config['name']}: blocked ({code})"
+            last_error = str(e)
+        except (_req.exceptions.Timeout, _req.exceptions.ConnectionError) as e:
+            last_error = str(e)
         except Exception as e:
             last_error = str(e)
-            if attempt < max_retries:
-                wait = backoff * attempt
-                print(f"    Retry {attempt}/{max_retries - 1} in {wait}s...")
-                time.sleep(wait)
 
-    error_msg = f"{source_config['name']}: {last_error} (failed after {max_retries} attempts)"
+        if attempt < max_retries:
+            wait = backoff * attempt
+            print(f"    Retry in {wait}s...")
+            time.sleep(wait)
+
+    # Shorten the error message for display
+    name = source_config['name']
+    if "timeout" in last_error.lower() or "timed out" in last_error.lower():
+        error_msg = f"{name}: timed out"
+    elif "403" in last_error:
+        error_msg = f"{name}: blocked (403)"
+    elif "404" in last_error:
+        error_msg = f"{name}: not found (404)"
+    elif "connection" in last_error.lower():
+        error_msg = f"{name}: connection failed"
+    elif "ssl" in last_error.lower():
+        error_msg = f"{name}: SSL error"
+    else:
+        error_msg = f"{name}: {last_error[:80]}"
     return [], error_msg
 
 
@@ -87,7 +111,7 @@ def run_scrapers(sources: list = None, db: BidDatabase = None, progress_callback
         if source_config.get("enabled", False):
             enabled_sources.append((source_key, source_config))
 
-    MAX_TOTAL_SECONDS = 420  # Hard cap: entire scan stops after 7 minutes (~60 sources)
+    MAX_TOTAL_SECONDS = 900  # Hard cap: 15 min (browser-based scraping takes longer)
 
     for i, (source_key, source_config) in enumerate(enabled_sources, 1):
         # Abort if total scan time exceeded
