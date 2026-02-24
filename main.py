@@ -116,8 +116,8 @@ def run_scrapers(sources: list = None, db: BidDatabase = None, progress_callback
     print(f"\n[*] Scoring {len(all_results)} opportunities...")
     scored = score_opportunities(all_results)
 
-    # Filter out very low-quality results (score < 5 = almost certainly noise)
-    MIN_STORE_SCORE = 5
+    # Filter out low-quality results — a real bid with location+keywords scores 15+
+    MIN_STORE_SCORE = 15
     quality_results = [opp for opp in scored if opp.relevance_score >= MIN_STORE_SCORE]
     discarded = len(scored) - len(quality_results)
     if discarded:
