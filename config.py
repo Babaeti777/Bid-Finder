@@ -496,7 +496,7 @@ SOURCES = {
     "montgomery_county": {
         "name": "Montgomery County MD (Open Data)",
         "base_url": "https://www.montgomerycountymd.gov/PRO/solicitations/formal-solicitations.html",
-        "api_url": "https://data.montgomerycountymd.gov/resource/di6a-s568.json",
+        "api_url": "https://data.montgomerycountymd.gov/resource/m3ju-5p4v.json",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -548,7 +548,7 @@ SOURCES = {
     },
     "city_of_alexandria": {
         "name": "City of Alexandria Procurement",
-        "base_url": "https://www.alexandriava.gov/purchasing/current-solicitations",
+        "base_url": "https://www.alexandriava.gov/purchasing",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -580,7 +580,7 @@ SOURCES = {
     },
     "city_of_manassas_park": {
         "name": "City of Manassas Park Procurement",
-        "base_url": "https://www.manassasparkva.gov/government/departments/finance/purchasing",
+        "base_url": "https://www.manassasparkva.gov/government/city_purchasing___procurement.php",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -604,7 +604,7 @@ SOURCES = {
     },
     "spotsylvania_county": {
         "name": "Spotsylvania County Procurement",
-        "base_url": "https://www.spotsylvania.va.us/bids",
+        "base_url": "https://www.spotsylvania.va.us/Bids.aspx",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -624,7 +624,7 @@ SOURCES = {
     },
     "mwaa": {
         "name": "Metropolitan Washington Airports Authority",
-        "base_url": "https://www.mwaa.com/business/procurement-opportunities",
+        "base_url": "https://www.mwaa.com/business/procurement",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -632,7 +632,7 @@ SOURCES = {
     },
     "wssc_water": {
         "name": "WSSC Water",
-        "base_url": "https://www.wsscwater.com/business/bids-proposals",
+        "base_url": "https://www.wsscwater.com/procurement",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -656,7 +656,7 @@ SOURCES = {
     },
     "loudoun_water": {
         "name": "Loudoun Water",
-        "base_url": "https://www.loudounwater.org/about-us/procurement",
+        "base_url": "https://www.loudounwater.org/procurement",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -676,7 +676,7 @@ SOURCES = {
     # ==========================================================
     "fcps": {
         "name": "Fairfax County Public Schools",
-        "base_url": "https://www.fcps.edu/about-fcps/procurement-services/current-solicitations",
+        "base_url": "https://www.fcps.edu/about-fcps/procurement-services",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -708,7 +708,7 @@ SOURCES = {
     },
     "acps": {
         "name": "Alexandria City Public Schools",
-        "base_url": "https://www.acps.k12.va.us/departments/financial-services/procurement",
+        "base_url": "https://www.acps.k12.va.us/departments/financial-services/procurement-and-general-services",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -744,7 +744,7 @@ SOURCES = {
     },
     "howard_county": {
         "name": "Howard County MD Procurement",
-        "base_url": "https://www.howardcountymd.gov/departments/purchasing",
+        "base_url": "https://www.howardcountymd.gov/procurement-contract-administration/current-solicitations",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -820,7 +820,7 @@ SOURCES = {
     # ==========================================================
     "culpeper_county": {
         "name": "Culpeper County Procurement",
-        "base_url": "https://www.culpepercounty.gov/government/bids-rfps",
+        "base_url": "https://web.culpepercounty.gov/rfps",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -844,7 +844,7 @@ SOURCES = {
     },
     "king_george_county": {
         "name": "King George County VA Procurement",
-        "base_url": "https://www.king-george.va.us/bids",
+        "base_url": "https://www.king-george.va.us/Bids.aspx",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -892,7 +892,7 @@ SOURCES = {
     },
     "town_of_warrenton": {
         "name": "Town of Warrenton Procurement",
-        "base_url": "https://www.warrentonva.gov/government/departments/finance/bids-rfps",
+        "base_url": "https://www.warrentonva.gov/488/Bids-Proposals",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -900,7 +900,7 @@ SOURCES = {
     },
     "town_of_front_royal": {
         "name": "Town of Front Royal Procurement",
-        "base_url": "https://www.frontroyalva.com/bids",
+        "base_url": "https://www.frontroyalva.com/367/Purchasing",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -916,7 +916,7 @@ SOURCES = {
     },
     "town_of_culpeper": {
         "name": "Town of Culpeper Procurement",
-        "base_url": "https://www.culpeperva.gov/government/bids-rfps",
+        "base_url": "https://www.culpeperva.gov/government/finance_and_treasurer/procurement/current_solicitations.php",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -924,7 +924,7 @@ SOURCES = {
     },
     "town_of_dumfries": {
         "name": "Town of Dumfries Procurement",
-        "base_url": "https://www.dumfriesva.gov/government/bids-rfps",
+        "base_url": "https://www.dumfriesva.gov/departments/finance/procurement.php",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -932,7 +932,7 @@ SOURCES = {
     },
     "rappahannock_county": {
         "name": "Rappahannock County VA Procurement",
-        "base_url": "https://www.rappahannockcountyva.gov/bids",
+        "base_url": "https://www.rappahannockcountyva.gov/business/bid_opportunities.php",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -960,7 +960,7 @@ SOURCES = {
     },
     "nvcc": {
         "name": "Northern Virginia Community College",
-        "base_url": "https://www.nvcc.edu/procurement/",
+        "base_url": "https://www.nvcc.edu/purchasing/",
         "enabled": True,
         "type": "government",
         "cost": "free",

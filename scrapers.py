@@ -517,7 +517,7 @@ class MontgomeryCountyScraper(BaseScraper):
 
         api_url = self.config.get(
             "api_url",
-            "https://data.montgomerycountymd.gov/resource/di6a-s568.json"
+            "https://data.montgomerycountymd.gov/resource/m3ju-5p4v.json"
         )
 
         params = {
