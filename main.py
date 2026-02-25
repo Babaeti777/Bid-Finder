@@ -21,7 +21,7 @@ from pathlib import Path
 
 from config import SOURCES, OUTPUT
 from models import BidDatabase, BidOpportunity
-from scrapers import get_scraper
+from scrapers import get_scraper, HAS_BROWSER
 from scorer import score_opportunities
 
 
@@ -39,7 +39,13 @@ def _run_scraper_with_retry(source_key, source_config, max_retries=1, backoff=2)
             code = e.response.status_code if e.response is not None else 0
             # Don't retry 403/401 — site is blocking us
             if code in (401, 403):
-                return [], f"{source_config['name']}: blocked ({code})"
+                if HAS_BROWSER:
+                    return [], f"{source_config['name']}: blocked ({code})"
+                else:
+                    return [], f"{source_config['name']}: blocked ({code}) - needs browser"
+            # Don't retry 404 — page has moved
+            if code == 404:
+                return [], f"{source_config['name']}: page not found (404)"
             last_error = str(e)
         except (_req.exceptions.Timeout, _req.exceptions.ConnectionError) as e:
             last_error = str(e)
@@ -192,9 +198,22 @@ def run_scrapers(sources: list = None, db: BidDatabase = None, progress_callback
             print(f"    {ptype:25s} {count}")
 
     if errors:
+        blocked = [e for e in errors if "blocked" in e]
+        not_found = [e for e in errors if "not found" in e or "404" in e]
+        other_errs = [e for e in errors if e not in blocked and e not in not_found]
         print(f"\n  Errors ({len(errors)}):")
-        for e in errors:
-            print(f"    - {e}")
+        if blocked:
+            print(f"    Blocked by site ({len(blocked)}):")
+            for e in blocked:
+                print(f"      - {e}")
+        if not_found:
+            print(f"    Page moved/removed ({len(not_found)}):")
+            for e in not_found:
+                print(f"      - {e}")
+        if other_errs:
+            print(f"    Other errors ({len(other_errs)}):")
+            for e in other_errs:
+                print(f"      - {e}")
 
     # Show top opportunities
     top = scored[:10]

@@ -624,7 +624,7 @@ SOURCES = {
     },
     "mwaa": {
         "name": "Metropolitan Washington Airports Authority",
-        "base_url": "https://www.mwaa.com/business/procurement",
+        "base_url": "https://www.mwaa.com/business/current-contracting-opportunities",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -656,7 +656,7 @@ SOURCES = {
     },
     "loudoun_water": {
         "name": "Loudoun Water",
-        "base_url": "https://www.loudounwater.org/procurement",
+        "base_url": "https://www.loudounwater.org/doing-business-loudoun-water",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -676,7 +676,7 @@ SOURCES = {
     # ==========================================================
     "fcps": {
         "name": "Fairfax County Public Schools",
-        "base_url": "https://www.fcps.edu/about-fcps/procurement-services",
+        "base_url": "https://www.fcps.edu/get-involved/procurement-services/facilities-management-current-solicitations",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -700,7 +700,7 @@ SOURCES = {
     },
     "aps": {
         "name": "Arlington Public Schools",
-        "base_url": "https://www.apsva.us/procurement/",
+        "base_url": "https://www.apsva.us/procurement-office/solicitations/",
         "enabled": True,
         "type": "government",
         "cost": "free",
@@ -960,7 +960,7 @@ SOURCES = {
     },
     "nvcc": {
         "name": "Northern Virginia Community College",
-        "base_url": "https://www.nvcc.edu/purchasing/",
+        "base_url": "https://www.ssc.vccs.edu/procurement/solicitations-and-contracts/",
         "enabled": True,
         "type": "government",
         "cost": "free",
