@@ -521,7 +521,8 @@ class MontgomeryCountyScraper(BaseScraper):
         )
 
         params = {
-            "$order": "issuance_date DESC",
+            "$where": "status='Active'",
+            "$order": "issuancedate DESC",
             "$limit": 200,
         }
 
@@ -529,18 +530,19 @@ class MontgomeryCountyScraper(BaseScraper):
         resp = self._fetch(api_url, params=params)
         data = resp.json()
 
-        print(f"    [MoCo MD] Got {len(data)} solicitations from API")
+        print(f"    [MoCo MD] Got {len(data)} active solicitations from API")
 
         for record in data:
             try:
-                title = record.get("description", "") or record.get("solicitation_title", "") or ""
-                sol_number = record.get("solicitation_number", "") or record.get("solicitation", "") or ""
-                agency = record.get("department", "") or record.get("agency", "") or ""
-                status = record.get("status", "")
+                title = record.get("description", "") or ""
+                sol_number = record.get("number", "") or ""
+                agency = record.get("department", "") or ""
+                is_construction = record.get("construction", "")
 
                 combined = f"{title} {agency} {sol_number}"
 
-                if not self._is_construction_related(combined):
+                # Use the construction flag if available, else keyword match
+                if is_construction != "Y" and not self._is_construction_related(combined):
                     continue
 
                 ptype, kw_matches = self._match_keywords(combined)
@@ -558,8 +560,8 @@ class MontgomeryCountyScraper(BaseScraper):
                     location_county="Montgomery County",
                     location_state="MD",
                     agency_name=agency or "Montgomery County MD",
-                    posted_date=record.get("issuance_date", ""),
-                    due_date=record.get("closing_date", "") or record.get("due_date", ""),
+                    posted_date=record.get("issuancedate", ""),
+                    due_date=record.get("closingdate", ""),
                     keyword_matches=kw_matches,
                     scraped_at=datetime.now().isoformat(),
                 )
@@ -632,8 +634,12 @@ class EVAScraper(BaseScraper):
             except Exception as e:
                 print(f"    [eVA] Error parsing listing: {e}")
 
-        if not results and len(resp.text) < 5000:
-            print(f"    [eVA] Page appears to need JavaScript rendering.")
+        if not results:
+            body_text = soup.get_text(strip=True)
+            if len(body_text) < 500:
+                print(f"    [eVA] Page has very little content - may need JavaScript.")
+            else:
+                print(f"    [eVA] Page has content but no construction bids matched filters.")
             print(f"    [eVA] Browse manually: {base_url}")
 
         print(f"    [eVA] Construction-related results: {len(results)}")
