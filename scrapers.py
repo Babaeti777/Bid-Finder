@@ -632,8 +632,12 @@ class EVAScraper(BaseScraper):
             except Exception as e:
                 print(f"    [eVA] Error parsing listing: {e}")
 
-        if not results and len(resp.text) < 5000:
-            print(f"    [eVA] Page appears to need JavaScript rendering.")
+        if not results:
+            body_text = soup.get_text(strip=True)
+            if len(body_text) < 500:
+                print(f"    [eVA] Page has very little content - may need JavaScript.")
+            else:
+                print(f"    [eVA] Page has content but no construction bids matched filters.")
             print(f"    [eVA] Browse manually: {base_url}")
 
         print(f"    [eVA] Construction-related results: {len(results)}")
