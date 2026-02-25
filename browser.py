@@ -3,7 +3,10 @@ OAK BUILDERS LLC - Bid Finder
 Shared Playwright Browser Manager
 
 Provides a headless Chromium browser for scraping JavaScript-rendered pages.
-Falls back gracefully when Playwright is not installed (e.g., Render free tier).
+Falls back gracefully when Playwright is not installed.
+
+Key design: All Playwright operations run in a dedicated worker thread
+to avoid "Sync API inside asyncio loop" errors in gunicorn/Flask.
 
 Usage:
     from browser import browser_fetch, is_browser_available
@@ -13,53 +16,113 @@ Usage:
         soup = BeautifulSoup(html, "lxml")
 """
 
+import os
 import atexit
-
-_playwright_instance = None
-_browser = None
+import threading
+from concurrent.futures import Future
 
 
 def is_browser_available() -> bool:
-    """Check if Playwright + Chromium are installed."""
+    """Check if Playwright + Chromium are installed and the binary exists."""
     try:
         from playwright.sync_api import sync_playwright
-        return True
+        # Quick check: can we actually find chromium?
+        p = sync_playwright().start()
+        try:
+            path = p.chromium.executable_path
+            exists = os.path.exists(path)
+            if not exists:
+                print(f"[Browser] Chromium not found at {path}")
+            return exists
+        except Exception:
+            return False
+        finally:
+            p.stop()
     except ImportError:
+        return False
+    except Exception as e:
+        print(f"[Browser] Availability check failed: {e}")
         return False
 
 
-def _get_browser():
-    """Get or create the shared browser instance (lazy init)."""
-    global _playwright_instance, _browser
+# ============================================================
+# Worker thread — runs Playwright sync API outside asyncio loop
+# ============================================================
 
-    if _browser is not None:
-        try:
-            # Check if browser is still connected
-            _browser.contexts
-            return _browser
-        except Exception:
-            _browser = None
-            _playwright_instance = None
+class _BrowserWorker:
+    """Runs all Playwright operations in a dedicated thread."""
 
-    from playwright.sync_api import sync_playwright
+    def __init__(self):
+        self._pw = None
+        self._browser = None
+        self._lock = threading.Lock()
+        self._thread = None
+        self._started = False
 
-    _playwright_instance = sync_playwright().start()
-    _browser = _playwright_instance.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",  # Avoid /dev/shm issues in Docker
-            "--disable-gpu",
-            "--disable-extensions",
-            "--disable-background-networking",
-            "--disable-default-apps",
-            "--disable-sync",
-            "--no-first-run",
-        ],
-    )
-    atexit.register(cleanup)
-    return _browser
+    def _ensure_browser(self):
+        """Launch browser if not already running (called inside worker thread)."""
+        if self._browser is not None:
+            return
+        from playwright.sync_api import sync_playwright
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-extensions",
+                "--single-process",
+            ],
+        )
 
+    def run_in_thread(self, fn):
+        """Run a function that uses Playwright in the worker thread.
+        The function receives (browser,) as argument and should return a value.
+        This method blocks until the function completes."""
+        result_future = Future()
+
+        def _worker():
+            try:
+                with self._lock:
+                    self._ensure_browser()
+                    result = fn(self._browser)
+                result_future.set_result(result)
+            except Exception as e:
+                result_future.set_exception(e)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout=60)  # Max 60s per operation
+
+        if t.is_alive():
+            result_future.set_exception(TimeoutError("Browser operation timed out (60s)"))
+
+        return result_future.result()
+
+    def shutdown(self):
+        with self._lock:
+            try:
+                if self._browser:
+                    self._browser.close()
+            except Exception:
+                pass
+            try:
+                if self._pw:
+                    self._pw.stop()
+            except Exception:
+                pass
+            self._browser = None
+            self._pw = None
+
+
+_worker = _BrowserWorker()
+atexit.register(_worker.shutdown)
+
+
+# ============================================================
+# Public API
+# ============================================================
 
 def browser_fetch(
     url: str,
@@ -67,46 +130,33 @@ def browser_fetch(
     timeout: int = 20000,
     wait_until: str = "domcontentloaded",
 ) -> str:
-    """
-    Fetch a URL with headless Chromium and return the fully rendered HTML.
+    """Fetch a URL with headless Chromium. Returns rendered HTML.
+    Safe to call from any thread including asyncio contexts."""
 
-    Args:
-        url: The URL to fetch.
-        wait_for: Optional CSS selector to wait for before capturing HTML.
-        timeout: Navigation timeout in milliseconds.
-        wait_until: Playwright load state - "domcontentloaded", "load", or "networkidle".
+    def _do(browser):
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+        )
+        page = context.new_page()
+        try:
+            page.goto(url, timeout=timeout, wait_until=wait_until)
+            if wait_for:
+                try:
+                    page.wait_for_selector(wait_for, timeout=8000)
+                except Exception:
+                    pass
+            page.wait_for_timeout(1500)
+            return page.content()
+        finally:
+            context.close()
 
-    Returns:
-        The fully rendered HTML content of the page.
-    """
-    browser = _get_browser()
-    context = browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        viewport={"width": 1280, "height": 800},
-        locale="en-US",
-    )
-    page = context.new_page()
-
-    try:
-        page.goto(url, timeout=timeout, wait_until=wait_until)
-
-        # Wait for dynamic content to load
-        if wait_for:
-            try:
-                page.wait_for_selector(wait_for, timeout=8000)
-            except Exception:
-                pass  # Selector not found, continue with whatever loaded
-
-        # Give React/Angular apps a moment to render
-        page.wait_for_timeout(1500)
-
-        return page.content()
-    finally:
-        context.close()
+    return _worker.run_in_thread(_do)
 
 
 def browser_fetch_with_login(
@@ -120,92 +170,63 @@ def browser_fetch_with_login(
     wait_for: str = None,
     timeout: int = 25000,
 ) -> str:
-    """
-    Login to a site and then fetch a target page. Returns rendered HTML.
+    """Login to a site and fetch a target page. Returns rendered HTML.
+    Safe to call from any thread including asyncio contexts."""
 
-    Args:
-        login_url: The login page URL.
-        target_url: The page to fetch after login.
-        email: Login email/username.
-        password: Login password.
-        email_selector: CSS selector for email/username input.
-        password_selector: CSS selector for password input.
-        submit_selector: CSS selector for submit button.
-        wait_for: Optional CSS selector to wait for on target page.
-        timeout: Navigation timeout in milliseconds.
+    def _do(browser):
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+        )
+        page = context.new_page()
+        try:
+            # Login
+            page.goto(login_url, timeout=timeout, wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
 
-    Returns:
-        The fully rendered HTML of the target page after authentication.
-    """
-    browser = _get_browser()
-    context = browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        viewport={"width": 1280, "height": 800},
-        locale="en-US",
-    )
-    page = context.new_page()
+            email_input = page.query_selector(email_selector)
+            if email_input:
+                email_input.fill(email)
+            else:
+                raise ValueError(f"Email input not found: {email_selector}")
 
-    try:
-        # Step 1: Navigate to login page
-        page.goto(login_url, timeout=timeout, wait_until="domcontentloaded")
-        page.wait_for_timeout(2000)
+            pw_input = page.query_selector(password_selector)
+            if pw_input:
+                pw_input.fill(password)
+            else:
+                raise ValueError(f"Password input not found: {password_selector}")
 
-        # Step 2: Fill in credentials
-        email_input = page.query_selector(email_selector)
-        if email_input:
-            email_input.fill(email)
-        else:
-            raise ValueError(f"Email input not found: {email_selector}")
+            submit_btn = page.query_selector(submit_selector)
+            if submit_btn:
+                submit_btn.click()
+            else:
+                pw_input.press("Enter")
 
-        pw_input = page.query_selector(password_selector)
-        if pw_input:
-            pw_input.fill(password)
-        else:
-            raise ValueError(f"Password input not found: {password_selector}")
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+            page.wait_for_timeout(2000)
 
-        # Step 3: Submit
-        submit_btn = page.query_selector(submit_selector)
-        if submit_btn:
-            submit_btn.click()
-        else:
-            # Try pressing Enter as fallback
-            pw_input.press("Enter")
+            # Navigate to target
+            page.goto(target_url, timeout=timeout, wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
 
-        # Step 4: Wait for navigation after login
-        page.wait_for_load_state("domcontentloaded", timeout=15000)
-        page.wait_for_timeout(2000)
+            if wait_for:
+                try:
+                    page.wait_for_selector(wait_for, timeout=8000)
+                except Exception:
+                    pass
 
-        # Step 5: Navigate to target page
-        page.goto(target_url, timeout=timeout, wait_until="domcontentloaded")
-        page.wait_for_timeout(2000)
+            return page.content()
+        finally:
+            context.close()
 
-        if wait_for:
-            try:
-                page.wait_for_selector(wait_for, timeout=8000)
-            except Exception:
-                pass
-
-        return page.content()
-    finally:
-        context.close()
+    return _worker.run_in_thread(_do)
 
 
 def cleanup():
     """Clean up browser and Playwright instances."""
-    global _browser, _playwright_instance
-    try:
-        if _browser:
-            _browser.close()
-    except Exception:
-        pass
-    try:
-        if _playwright_instance:
-            _playwright_instance.stop()
-    except Exception:
-        pass
-    _browser = None
-    _playwright_instance = None
+    _worker.shutdown()
