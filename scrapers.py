@@ -57,18 +57,43 @@ except ImportError:
 class BaseScraper(ABC):
     """Base class for all bid source scrapers."""
 
+    # Rotate User-Agent strings to reduce 403 blocks from WAFs
+    _USER_AGENTS = [
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            "Version/17.4 Safari/605.1.15"
+        ),
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) "
+            "Gecko/20100101 Firefox/125.0"
+        ),
+    ]
+
     def __init__(self, source_key: str, source_config: dict):
         self.source_key = source_key
         self.config = source_config
         self.session = requests.Session()
+        # Pick a User-Agent based on source key hash for consistency per source
+        ua_index = hash(source_key) % len(self._USER_AGENTS)
         self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
+            "User-Agent": self._USER_AGENTS[ua_index],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
         })
         self.results: List[BidOpportunity] = []
 
@@ -82,11 +107,31 @@ class BaseScraper(ABC):
         """
         pass
 
-    def _fetch(self, url, params=None, timeout=12):
-        """Fetch a URL and return the response. Lets errors propagate."""
-        resp = self.session.get(url, params=params, timeout=timeout)
-        resp.raise_for_status()
-        return resp
+    def _fetch(self, url, params=None, timeout=15):
+        """Fetch a URL and return the response.
+
+        On 403, retries once with a different User-Agent before propagating.
+        """
+        try:
+            resp = self.session.get(url, params=params, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code if e.response is not None else 0
+            if code == 403:
+                # Retry with a different User-Agent (cycle to next one)
+                current_ua = self.session.headers.get("User-Agent", "")
+                try:
+                    idx = self._USER_AGENTS.index(current_ua)
+                except ValueError:
+                    idx = 0
+                alt_ua = self._USER_AGENTS[(idx + 1) % len(self._USER_AGENTS)]
+                self.session.headers["User-Agent"] = alt_ua
+                time.sleep(1)
+                resp = self.session.get(url, params=params, timeout=timeout)
+                resp.raise_for_status()
+                return resp
+            raise
 
     def _fetch_with_browser(self, url, wait_for=None):
         """Fetch a URL using headless Chromium. Returns BeautifulSoup object.
@@ -116,10 +161,28 @@ class BaseScraper(ABC):
             return soup, False
         except requests.exceptions.HTTPError as e:
             code = e.response.status_code if e.response is not None else 0
-            if code == 403 and HAS_BROWSER:
-                print(f"    [Smart] Got 403, trying browser...")
-                soup = self._fetch_with_browser(url, wait_for=wait_for)
-                return soup, True
+            if code == 403:
+                # Try remaining User-Agents before falling back to browser
+                original_ua = self.session.headers.get("User-Agent", "")
+                for ua in self._USER_AGENTS:
+                    if ua == original_ua:
+                        continue
+                    self.session.headers["User-Agent"] = ua
+                    time.sleep(1)
+                    try:
+                        resp = self.session.get(url, params=params, timeout=15)
+                        if resp.status_code == 200:
+                            soup = BeautifulSoup(resp.text, "lxml")
+                            body_text = soup.get_text(strip=True)
+                            if len(body_text) > 500:
+                                return soup, False
+                    except Exception:
+                        continue
+
+                if HAS_BROWSER:
+                    print(f"    [Smart] All User-Agents blocked, trying browser...")
+                    soup = self._fetch_with_browser(url, wait_for=wait_for)
+                    return soup, True
             raise
 
     def _generate_source_id(self, *parts):

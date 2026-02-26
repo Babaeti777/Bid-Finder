@@ -18,6 +18,19 @@ from config import NOTIFICATIONS, SOURCES
 from models import BidDatabase
 
 
+def _is_expired(bid) -> bool:
+    """Return True if the bid's due_date is in the past."""
+    if not bid.due_date:
+        return False
+    for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%dT%H:%M:%S"]:
+        try:
+            due = datetime.strptime(bid.due_date[:10], fmt[:min(len(fmt), len(bid.due_date))])
+            return due.date() < datetime.now().date()
+        except ValueError:
+            continue
+    return False
+
+
 class EmailSender:
     """Sends HTML email digests of new bid opportunities."""
 
@@ -43,6 +56,8 @@ class EmailSender:
 
         min_score = NOTIFICATIONS.get("min_score_to_notify", 0)
         opportunities = self.db.get_new_since_last_email(min_score=min_score)
+        # Exclude expired bids from the email digest
+        opportunities = [opp for opp in opportunities if not _is_expired(opp)]
 
         if not opportunities and not scraper_errors:
             print("[Email] No new opportunities and no errors to report. Skipping email.")
