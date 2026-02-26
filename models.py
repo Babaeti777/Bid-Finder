@@ -356,6 +356,59 @@ class BidDatabase:
         ])
         self.conn.commit()
 
+    def remove_expired(self) -> int:
+        """Remove opportunities whose due_date is in the past.
+
+        Only removes bids with status 'new' (user-reviewed bids are kept).
+        Returns the number of rows deleted.
+        """
+        # due_date is stored as text in various formats; the most common is
+        # YYYY-MM-DD which sorts lexicographically.  We handle that plus
+        # MM/DD/YYYY by using date('now') comparison for ISO dates, and
+        # fetching non-ISO rows for Python-side filtering.
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # 1) Delete ISO-formatted dates that are clearly past due
+        cursor = self.conn.execute("""
+            DELETE FROM opportunities
+            WHERE status = 'new'
+              AND due_date != ''
+              AND due_date LIKE '____-__-__%'
+              AND due_date < ?
+        """, [today])
+        iso_deleted = cursor.rowcount
+
+        # 2) Handle MM/DD/YYYY and other formats via Python
+        rows = self.conn.execute("""
+            SELECT id, due_date FROM opportunities
+            WHERE status = 'new'
+              AND due_date != ''
+              AND due_date NOT LIKE '____-__-__%'
+        """).fetchall()
+
+        non_iso_ids = []
+        for row in rows:
+            due_str = row["due_date"]
+            for fmt in ["%m/%d/%Y", "%m-%d-%Y"]:
+                try:
+                    due = datetime.strptime(due_str[:10], fmt)
+                    if due.date() < datetime.now().date():
+                        non_iso_ids.append(row["id"])
+                    break
+                except ValueError:
+                    continue
+
+        if non_iso_ids:
+            for i in range(0, len(non_iso_ids), 100):
+                batch = non_iso_ids[i:i + 100]
+                placeholders = ",".join("?" * len(batch))
+                self.conn.execute(
+                    f"DELETE FROM opportunities WHERE id IN ({placeholders})", batch
+                )
+
+        self.conn.commit()
+        return iso_deleted + len(non_iso_ids)
+
     # --- Cross-source deduplication ---
 
     @staticmethod

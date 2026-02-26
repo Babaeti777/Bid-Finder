@@ -16,13 +16,26 @@ import argparse
 import csv
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from config import SOURCES, OUTPUT
 from models import BidDatabase, BidOpportunity
 from scrapers import get_scraper, HAS_BROWSER
 from scorer import score_opportunities
+
+
+def _is_expired(bid: BidOpportunity) -> bool:
+    """Return True if the bid's due_date is in the past."""
+    if not bid.due_date:
+        return False  # No date = can't tell, keep it
+    for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%dT%H:%M:%S"]:
+        try:
+            due = datetime.strptime(bid.due_date[:10], fmt[:min(len(fmt), len(bid.due_date))])
+            return due.date() < datetime.now().date()
+        except ValueError:
+            continue
+    return False  # Unparseable date = keep it
 
 
 def _run_scraper_with_retry(source_key, source_config, max_retries=1, backoff=2):
@@ -146,10 +159,16 @@ def run_scrapers(sources: list = None, db: BidDatabase = None, progress_callback
     print(f"\n[*] Scoring {len(all_results)} opportunities...")
     scored = score_opportunities(all_results)
 
+    # Filter out expired bids (due date in the past)
+    active_results = [opp for opp in scored if not _is_expired(opp)]
+    expired_count = len(scored) - len(active_results)
+    if expired_count:
+        print(f"    Filtered out {expired_count} expired opportunities (past due date)")
+
     # Filter out low-quality results — a real bid with location+keywords scores 15+
     MIN_STORE_SCORE = 15
-    quality_results = [opp for opp in scored if opp.relevance_score >= MIN_STORE_SCORE]
-    discarded = len(scored) - len(quality_results)
+    quality_results = [opp for opp in active_results if opp.relevance_score >= MIN_STORE_SCORE]
+    discarded = len(active_results) - len(quality_results)
     if discarded:
         print(f"    Discarded {discarded} low-quality results (score < {MIN_STORE_SCORE})")
 
@@ -159,6 +178,11 @@ def run_scrapers(sources: list = None, db: BidDatabase = None, progress_callback
         row_id = db.upsert_opportunity(opp)
         if row_id > 0:
             new_count += 1
+
+    # Remove expired bids from the database (past due, still status='new')
+    expired_removed = db.remove_expired()
+    if expired_removed:
+        print(f"    Removed {expired_removed} expired bids from database")
 
     # Deduplicate cross-source entries
     dedup_count = db.deduplicate()

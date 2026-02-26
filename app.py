@@ -25,6 +25,20 @@ from flask import (
 from config import SOURCES, OUTPUT
 from models import BidDatabase
 
+
+def _bid_is_expired(bid) -> bool:
+    """Return True if the bid's due_date is in the past."""
+    if not bid.due_date:
+        return False
+    for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%dT%H:%M:%S"]:
+        try:
+            due = datetime.strptime(bid.due_date[:10], fmt[:min(len(fmt), len(bid.due_date))])
+            return due.date() < datetime.now().date()
+        except ValueError:
+            continue
+    return False
+
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24))
 
@@ -274,15 +288,19 @@ def api_stats():
 def api_bids():
     db = _get_db()
     try:
+        hide_expired = request.args.get("show_expired", "0") != "1"
         bids = db.search(
             project_type=request.args.get("type") or None,
             source=request.args.get("source") or None,
             status=request.args.get("status") or None,
             min_score=int(request.args.get("min_score", 0)),
             keyword=request.args.get("q") or None,
-            limit=int(request.args.get("limit", 100)),
+            limit=int(request.args.get("limit", 200)),
             offset=int(request.args.get("offset", 0)),
         )
+        # Filter expired bids (due_date in the past) unless show_expired=1
+        if hide_expired:
+            bids = [b for b in bids if not _bid_is_expired(b)]
         results = []
         for b in bids:
             location = ", ".join(filter(None, [b.location_city, b.location_county, b.location_state]))
