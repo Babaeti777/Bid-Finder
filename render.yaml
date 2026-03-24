@@ -9,10 +9,16 @@ services:
       - key: PYTHON_VERSION
         value: "3.11.7"
       - key: APP_PASSWORD
-        sync: false  # Set manually in Render dashboard
+        sync: false
       - key: SAM_GOV_API_KEY
         sync: false
       - key: FLASK_SECRET_KEY
         generateValue: true
       - key: API_TRIGGER_KEY
         generateValue: true
+      - key: GMAIL_ADDRESS
+        sync: false
+      - key: GMAIL_APP_PASSWORD
+        sync: false
+      - key: EMAIL_RECIPIENTS
+        sync: false

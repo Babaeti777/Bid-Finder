@@ -2,74 +2,68 @@ name: Daily Bid Scrape
 
 on:
   schedule:
-    # 8 AM Eastern = 13:00 UTC (EST) / 12:00 UTC (EDT)
-    # Using 13:00 UTC to cover 8 AM EST year-round
-    - cron: '0 13 * * *'
-  workflow_dispatch: # Allow manual trigger from GitHub UI
+    # 1 PM UTC = 8 AM ET (year-round, close enough for EST/EDT)
+    - cron: "0 13 * * *"
+  workflow_dispatch:  # Manual trigger from GitHub UI
 
 env:
-  PYTHON_VERSION: '3.11'
+  PYTHON_VERSION: "3.11"
 
 jobs:
-  scrape-and-notify:
+  scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Install Playwright Chromium
-        run: playwright install chromium --with-deps
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
 
       - name: Download previous database
-        uses: dawidd6/action-download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: bid-database
+          name: bids-database
           path: .
-          if_no_artifact_found: warn
         continue-on-error: true
 
-      - name: Run bid finder (scrape + email + sheets)
+      - name: Run bid finder
         env:
           SAM_GOV_API_KEY: ${{ secrets.SAM_GOV_API_KEY }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
+          GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+          SHEETS_SPREADSHEET_NAME: ${{ secrets.SHEETS_SPREADSHEET_NAME }}
           BIDNET_EMAIL: ${{ secrets.BIDNET_EMAIL }}
           BIDNET_PASSWORD: ${{ secrets.BIDNET_PASSWORD }}
           OPENGOV_EMAIL: ${{ secrets.OPENGOV_EMAIL }}
           OPENGOV_PASSWORD: ${{ secrets.OPENGOV_PASSWORD }}
-        run: python main.py --cloud
+        run: python main.py --email --sheets
 
       - name: Upload database artifact
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: bid-database
-          path: oak_bids.db
+          name: bids-database
+          path: bids.db
           retention-days: 90
-          overwrite: true
 
-      - name: Trigger scan on hosted dashboard
+      - name: Trigger dashboard refresh
+        if: ${{ secrets.RENDER_DASHBOARD_URL != '' }}
         env:
-          RENDER_APP_URL: ${{ secrets.RENDER_APP_URL }}
+          RENDER_DASHBOARD_URL: ${{ secrets.RENDER_DASHBOARD_URL }}
           API_TRIGGER_KEY: ${{ secrets.API_TRIGGER_KEY }}
-        if: env.RENDER_APP_URL != ''
         run: |
-          echo "Triggering scan on hosted dashboard..."
-          curl -s -X POST \
-            "${RENDER_APP_URL}/api/run?key=${API_TRIGGER_KEY}" \
-            --max-time 10 || echo "Dashboard trigger skipped (may be sleeping)"
+          curl -s -X POST "${RENDER_DASHBOARD_URL}/api/run" \
+            -H "X-API-Key: ${API_TRIGGER_KEY}" \
+            --max-time 10 || echo "Dashboard trigger skipped"
         continue-on-error: true

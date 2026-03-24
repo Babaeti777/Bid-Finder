@@ -1,1644 +1,994 @@
 """
-OAK BUILDERS LLC - Bid Finder
-Web Scrapers for Each Data Source
+OAK BUILDERS LLC - Bid Finder v2
+Web Scrapers — expanded source coverage
 
-Scraper Status:
-  SAMGovScraper     - SAM.gov REST API (requires free API key from api.data.gov)
-  DCOCPScraper      - DC Open Data ArcGIS REST API (no key needed)
-  EVAScraper        - eVA Virginia Business Opportunities at mvendor.cgieva.com
-  CountyScraper     - Generic HTML scraper for county procurement pages
-  PermitScraper     - Generic HTML scraper for building permit pages
-
-Sites requiring JavaScript (Bonfire, Ivalua) use CountyScraper as fallback.
-  BidNetScraper      - BidNet Direct with authenticated session login
+Changes from v1:
+- SAM.gov: queries ALL NAICS codes (primary + secondary), 45-day lookback
+- SAM.gov: extracts set-aside, contact info, pre-bid dates from full notices
+- PlanHub: NEW scraper for commercial plan room leads
+- eMMA Maryland: NEW scraper for Maryland state procurement
+- DC OCP: improved to extract more metadata
+- County scraper: smarter fallback strategies, better date parsing
+- All scrapers: extract bonding requirements when available
+- All scrapers: better error messages for debugging
+- Added RSS/Atom feed scraper for agencies that publish feeds
 """
 
+import hashlib
+import json
+import logging
 import os
 import re
-import json
 import time
-import hashlib
-from datetime import datetime, timedelta
 from abc import ABC, abstractmethod
-from typing import List
+from datetime import datetime, timedelta
+from typing import List, Optional
 from urllib.parse import urljoin, urlencode, quote
 
-try:
-    import requests
-    from bs4 import BeautifulSoup
-except ImportError:
-    print("Install dependencies: pip install requests beautifulsoup4 lxml")
-    raise
+import requests
+from bs4 import BeautifulSoup
 
+from config import KEYWORDS, LOCATIONS, COMPANY, SOURCES, REQUEST_TIMEOUT
 from models import BidOpportunity
-from config import KEYWORDS, LOCATIONS, COMPANY, SCRAPER_FILTER_TERMS
 
-# Optional: Playwright for JS-rendered sites
-try:
-    from browser import browser_fetch, browser_fetch_with_login, is_browser_available
-    HAS_BROWSER = is_browser_available()
-except ImportError:
-    HAS_BROWSER = False
+logger = logging.getLogger("scrapers")
 
-    def browser_fetch(*a, **kw):
-        raise RuntimeError("Playwright not installed")
+# ─── User-Agent rotation ────────────────────────────────────────────
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+]
 
-    def browser_fetch_with_login(*a, **kw):
-        raise RuntimeError("Playwright not installed")
+_ua_index = 0
+def get_ua():
+    global _ua_index
+    ua = USER_AGENTS[_ua_index % len(USER_AGENTS)]
+    _ua_index += 1
+    return ua
 
-    def is_browser_available():
-        return False
 
-
-# ============================================================
-# BASE SCRAPER
-# ============================================================
-
+# ─── Base scraper ───────────────────────────────────────────────────
 class BaseScraper(ABC):
-    """Base class for all bid source scrapers."""
+    """Abstract base class for all scrapers."""
 
-    # Rotate User-Agent strings to reduce 403 blocks from WAFs
-    _USER_AGENTS = [
-        (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-            "Version/17.4 Safari/605.1.15"
-        ),
-        (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) "
-            "Gecko/20100101 Firefox/125.0"
-        ),
-    ]
-
-    def __init__(self, source_key: str, source_config: dict):
-        self.source_key = source_key
-        self.config = source_config
+    def __init__(self):
         self.session = requests.Session()
-        # Pick a User-Agent based on source key hash for consistency per source
-        ua_index = hash(source_key) % len(self._USER_AGENTS)
-        self.session.headers.update({
-            "User-Agent": self._USER_AGENTS[ua_index],
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
-        })
-        self.results: List[BidOpportunity] = []
+        self.session.headers.update({"User-Agent": get_ua()})
 
     @abstractmethod
     def scrape(self) -> List[BidOpportunity]:
-        """Scrape and return bid opportunities.
-
-        IMPORTANT: Let HTTP errors (ConnectionError, HTTPError, Timeout)
-        propagate so that main.py retry logic can catch and retry them.
-        Only catch errors for individual listing parsing.
-        """
         pass
 
-    def _fetch(self, url, params=None, timeout=15):
-        """Fetch a URL and return the response.
+    def _fetch(self, url: str, params: dict = None, timeout: int = None) -> requests.Response:
+        """HTTP GET with timeout and error handling."""
+        resp = self.session.get(
+            url, params=params,
+            timeout=timeout or REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp
 
-        On 403, retries once with a different User-Agent before propagating.
-        """
+    def _fetch_json(self, url: str, params: dict = None) -> dict:
+        resp = self._fetch(url, params)
+        return resp.json()
+
+    def _fetch_html(self, url: str, params: dict = None) -> BeautifulSoup:
+        resp = self._fetch(url, params)
+        return BeautifulSoup(resp.text, "lxml")
+
+    def _browser_fetch(self, url: str, wait_for: str = None) -> Optional[BeautifulSoup]:
+        """Fallback to headless browser if available."""
         try:
-            resp = self.session.get(url, params=params, timeout=timeout)
-            resp.raise_for_status()
-            return resp
-        except requests.exceptions.HTTPError as e:
-            code = e.response.status_code if e.response is not None else 0
-            if code == 403:
-                # Retry with a different User-Agent (cycle to next one)
-                current_ua = self.session.headers.get("User-Agent", "")
-                try:
-                    idx = self._USER_AGENTS.index(current_ua)
-                except ValueError:
-                    idx = 0
-                alt_ua = self._USER_AGENTS[(idx + 1) % len(self._USER_AGENTS)]
-                self.session.headers["User-Agent"] = alt_ua
-                time.sleep(1)
-                resp = self.session.get(url, params=params, timeout=timeout)
-                resp.raise_for_status()
-                return resp
-            raise
-
-    def _fetch_with_browser(self, url, wait_for=None):
-        """Fetch a URL using headless Chromium. Returns BeautifulSoup object.
-        Raises RuntimeError if Playwright is not installed."""
-        if not HAS_BROWSER:
-            raise RuntimeError("Playwright not available")
-        print(f"    [Browser] Rendering {url[:80]}...")
-        html = browser_fetch(url, wait_for=wait_for)
-        print(f"    [Browser] Got {len(html)} bytes of rendered HTML")
-        return BeautifulSoup(html, "lxml")
-
-    def _fetch_smart(self, url, params=None, wait_for=None):
-        """Try requests first, fall back to browser on 403/empty response.
-        Returns (BeautifulSoup, was_browser_used)."""
-        try:
-            resp = self._fetch(url, params=params)
-            soup = BeautifulSoup(resp.text, "lxml")
-            # Check if response is a JS shell (minimal HTML with no real content)
-            body_text = soup.get_text(strip=True)
-            if len(body_text) > 500:
-                return soup, False
-            # Too little content — probably an SPA shell
-            if HAS_BROWSER:
-                print(f"    [Smart] Page has only {len(body_text)} chars of text, trying browser...")
-                soup = self._fetch_with_browser(url, wait_for=wait_for)
-                return soup, True
-            return soup, False
-        except requests.exceptions.HTTPError as e:
-            code = e.response.status_code if e.response is not None else 0
-            if code == 403:
-                # Try remaining User-Agents before falling back to browser
-                original_ua = self.session.headers.get("User-Agent", "")
-                for ua in self._USER_AGENTS:
-                    if ua == original_ua:
-                        continue
-                    self.session.headers["User-Agent"] = ua
-                    time.sleep(1)
-                    try:
-                        resp = self.session.get(url, params=params, timeout=15)
-                        if resp.status_code == 200:
-                            soup = BeautifulSoup(resp.text, "lxml")
-                            body_text = soup.get_text(strip=True)
-                            if len(body_text) > 500:
-                                return soup, False
-                    except Exception:
-                        continue
-
-                if HAS_BROWSER:
-                    print(f"    [Smart] All User-Agents blocked, trying browser...")
-                    soup = self._fetch_with_browser(url, wait_for=wait_for)
-                    return soup, True
-            raise
-
-    def _generate_source_id(self, *parts):
-        """Generate a unique source_id from parts of the listing."""
-        raw = "|".join(str(p) for p in parts)
-        return hashlib.md5(raw.encode()).hexdigest()[:16]
+            from browser import browser_fetch, is_browser_available
+            if not is_browser_available():
+                return None
+            html = browser_fetch(url, wait_for=wait_for)
+            if html:
+                return BeautifulSoup(html, "lxml")
+        except ImportError:
+            pass
+        return None
 
     def _clean_text(self, text: str) -> str:
         if not text:
             return ""
         return re.sub(r'\s+', ' ', text).strip()
 
-    def _parse_value(self, text: str) -> tuple:
-        """Extract min/max dollar values from text."""
-        if not text:
-            return None, None
-        amounts = re.findall(r'\$[\d,]+(?:\.\d{2})?', text)
-        amounts = [float(a.replace('$', '').replace(',', '')) for a in amounts]
-        if len(amounts) >= 2:
-            return min(amounts), max(amounts)
-        elif len(amounts) == 1:
-            return amounts[0], amounts[0]
-        return None, None
-
-    def _match_keywords(self, text: str) -> tuple:
-        """Score text against keyword lists. Returns (project_type, matched_keywords)."""
+    def _extract_keywords(self, text: str) -> List[str]:
+        """Find matching keywords in text."""
         text_lower = text.lower()
-        best_type = "general"
-        best_count = 0
-        all_matches = []
+        matches = []
+        for category, kw_list in KEYWORDS.items():
+            for kw in kw_list:
+                if kw.lower() in text_lower and kw not in matches:
+                    matches.append(kw)
+        return matches
 
-        for ptype, keywords in KEYWORDS.items():
-            matches = [kw for kw in keywords if kw.lower() in text_lower]
-            all_matches.extend(matches)
-            if len(matches) > best_count:
-                best_count = len(matches)
-                best_type = ptype
+    def _extract_location(self, text: str) -> dict:
+        """Extract location components from text."""
+        result = {"city": "", "county": "", "state": "", "zip": ""}
 
-        return best_type, list(set(all_matches))
-
-    def _is_construction_related(self, text: str) -> bool:
-        """Check if text matches any construction filter terms."""
-        text_lower = text.lower()
-        return any(term in text_lower for term in SCRAPER_FILTER_TERMS)
-
-    def _match_location(self, text: str) -> dict:
-        """Try to extract NOVA location info from text."""
-        text_lower = text.lower()
-        result = {"city": "", "county": "", "state": "VA"}
-
-        for city in LOCATIONS["cities"]:
-            if city.lower() in text_lower:
-                result["city"] = city
-                break
-
-        for county in LOCATIONS["counties"]:
-            if county.lower().replace(" county", "") in text_lower:
-                result["county"] = county
-                break
-
-        zip_match = re.search(r'\b(2[012]\d{3})\b', text)
+        # ZIP code
+        zip_match = re.search(r'\b(\d{5})(?:-\d{4})?\b', text)
         if zip_match:
             result["zip"] = zip_match.group(1)
 
-        if "washington" in text_lower or " dc " in text_lower or "d.c." in text_lower:
-            result["state"] = "DC"
-        elif "maryland" in text_lower or " md " in text_lower:
-            result["state"] = "MD"
+        # State
+        for state in LOCATIONS["states"]:
+            if state in text:
+                result["state"] = state
+                break
+
+        # City
+        for city in LOCATIONS["cities"]:
+            if city.lower() in text.lower():
+                result["city"] = city
+                break
+
+        # County
+        for county in LOCATIONS["counties"]:
+            if county.lower().replace(" county", "") in text.lower():
+                result["county"] = county
+                break
 
         return result
 
-    def _is_valid_href(self, href):
-        """Check if an href is a real page link (not anchor/javascript)."""
-        if not href:
-            return False
-        href = href.strip()
-        if href in ("#", "/", ""):
-            return False
-        if href.startswith(("#", "javascript:", "mailto:", "tel:")):
-            return False
-        return True
+    def _parse_money(self, text: str) -> Optional[float]:
+        """Parse dollar amounts from text."""
+        if not text:
+            return None
+        # Match patterns like $1,234,567.89 or $1.5M or $500K
+        text = text.replace(",", "").replace(" ", "")
 
-    def _make_detail_url(self, base_url, href):
-        """Build a full URL. Returns base_url if href resolves to just the site root."""
-        if not href or not self._is_valid_href(href):
-            return base_url
-        url = urljoin(base_url, href)
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
-        # If the link just goes to the homepage, return the listing page instead
-        if parsed.path in ("", "/", "/index.html", "/index.htm"):
-            return base_url
-        return url
+        m = re.search(r'\$?([\d.]+)\s*[Mm](?:illion)?', text)
+        if m:
+            return float(m.group(1)) * 1_000_000
 
-    def _find_links_broad(self, soup):
-        """Try multiple strategies to find bid listing links."""
-        results = []
+        m = re.search(r'\$?([\d.]+)\s*[Kk]', text)
+        if m:
+            return float(m.group(1)) * 1_000
 
-        # Strategy 1: Table rows with links
-        for table in soup.select("table"):
-            for row in table.select("tr"):
-                link = row.select_one("a[href]")
-                if link and link.get_text(strip=True) and self._is_valid_href(link.get("href", "")):
-                    cells = row.select("td")
-                    cell_texts = [c.get_text(strip=True) for c in cells]
-                    results.append({
-                        "title": link.get_text(strip=True),
-                        "href": link.get("href", ""),
-                        "extra_text": " ".join(cell_texts),
-                    })
+        m = re.search(r'\$?([\d.]+)', text)
+        if m:
+            val = float(m.group(1))
+            if val > 100:  # Likely a real dollar amount
+                return val
 
-        # Strategy 2: List items with links
-        if not results:
-            for li in soup.select("li"):
-                link = li.select_one("a[href]")
-                if link and link.get_text(strip=True) and self._is_valid_href(link.get("href", "")):
-                    results.append({
-                        "title": link.get_text(strip=True),
-                        "href": link.get("href", ""),
-                        "extra_text": li.get_text(strip=True),
-                    })
+        return None
 
-        # Strategy 3: Div-based listings with links
-        if not results:
-            for div in soup.select("div.row, div.item, div.listing, div.card, article"):
-                link = div.select_one("a[href]")
-                if link and link.get_text(strip=True) and self._is_valid_href(link.get("href", "")):
-                    results.append({
-                        "title": link.get_text(strip=True),
-                        "href": link.get("href", ""),
-                        "extra_text": div.get_text(strip=True),
-                    })
-
-        # Strategy 4: All links as last resort (filter later)
-        if not results:
-            for link in soup.select("a[href]"):
-                text = link.get_text(strip=True)
-                href = link.get("href", "")
-                if text and len(text) > 10 and self._is_valid_href(href):
-                    results.append({
-                        "title": text,
-                        "href": href,
-                        "extra_text": text,
-                    })
-
-        return results
+    def _is_construction_related(self, text: str) -> bool:
+        """Quick check if text is construction-related."""
+        text_lower = text.lower()
+        construction_indicators = [
+            "construction", "renovation", "repair", "replacement",
+            "installation", "building", "contractor", "roofing",
+            "plumbing", "electrical", "hvac", "demolition",
+            "masonry", "concrete", "paving", "fencing",
+            "waterproofing", "painting", "flooring",
+        ]
+        return any(ind in text_lower for ind in construction_indicators)
 
 
-# ============================================================
-# SAM.GOV SCRAPER (Federal Opportunities - JSON API)
-# ============================================================
-
-class SAMGovScraper(BaseScraper):
+# ─── SAM.gov (Federal) ──────────────────────────────────────────────
+class SamGovScraper(BaseScraper):
     """
-    Scrapes SAM.gov using the official Opportunities API v2.
-    Requires a free API key from https://api.data.gov/signup/
-    Set environment variable: SAM_GOV_API_KEY=your_key
+    Federal opportunities via SAM.gov API v2.
+    Now queries all NAICS codes with 45-day lookback.
     """
+
+    API_BASE = "https://api.sam.gov/opportunities/v2/search"
 
     def scrape(self) -> List[BidOpportunity]:
         api_key = os.environ.get("SAM_GOV_API_KEY", "")
         if not api_key:
-            print("[SAM.gov] WARNING: No API key found.")
-            print("[SAM.gov] Get a FREE key at: https://api.data.gov/signup/")
-            print("[SAM.gov] Then set it in Settings or: export SAM_GOV_API_KEY=your_key")
-            # Don't raise - just return empty with clear message
+            logger.warning("SAM_GOV_API_KEY not set, skipping SAM.gov")
             return []
 
-        # Use API URL from config (includes /prod/)
-        api_url = self.config.get(
-            "api_url",
-            "https://api.sam.gov/prod/opportunities/v2/search"
-        )
-
-        results = []
-        states = ["VA", "DC", "MD"]  # Must query one state at a time
-        ptypes = ["o", "k", "p"]  # Solicitation, Combined, Presolicitation
-
-        posted_from = (datetime.now() - timedelta(days=30)).strftime("%m/%d/%Y")
+        all_results = []
+        naics_codes = [COMPANY["primary_naics"]] + COMPANY["secondary_naics"]
+        posted_from = (datetime.now() - timedelta(days=45)).strftime("%m/%d/%Y")
         posted_to = datetime.now().strftime("%m/%d/%Y")
 
-        scan_start = time.time()
-        MAX_SAM_SECONDS = 90  # Hard cap so SAM.gov doesn't monopolize the scan
+        for naics in naics_codes:
+            try:
+                params = {
+                    "api_key": api_key,
+                    "postedFrom": posted_from,
+                    "postedTo": posted_to,
+                    "ncode": naics,
+                    "ptype": "o,k",  # Opportunities + combined
+                    "limit": 100,
+                    "offset": 0,
+                }
 
-        _timed_out = False
-        for state in states:
-            if _timed_out:
-                break
-            for naics in COMPANY["naics_codes"]:
-                # Abort if we've been running too long
-                if time.time() - scan_start > MAX_SAM_SECONDS:
-                    print(f"    [SAM.gov] Time limit reached ({MAX_SAM_SECONDS}s) - stopping")
-                    _timed_out = True
-                    break
-                try:
-                    params = {
-                        "api_key": api_key,
-                        "postedFrom": posted_from,
-                        "postedTo": posted_to,
-                        "ncode": naics,
-                        "ptype": ptypes,  # requests sends as ptype=o&ptype=k&ptype=p
-                        "state": state,
-                        "limit": 25,
-                        "offset": 0,
-                    }
-
-                    print(f"    [SAM.gov] Querying {state} / NAICS {naics}...")
-                    resp = self._fetch(api_url, params=params, timeout=15)
-                    data = resp.json()
-
+                # Search for DC/VA/MD
+                for state in ["VA", "DC", "MD"]:
+                    params["state"] = state
+                    data = self._fetch_json(self.API_BASE, params)
                     opps = data.get("opportunitiesData", [])
-                    print(f"    [SAM.gov] Got {len(opps)} results for {state}/{naics}")
 
                     for opp in opps:
-                        try:
-                            title = opp.get("title", "")
-                            # The description field is a URL in the API, not inline text
-                            desc_url = opp.get("description", "")
-                            sol_num = opp.get("solicitationNumber", "")
+                        bid = self._parse_opportunity(opp)
+                        if bid:
+                            all_results.append(bid)
 
-                            combined = f"{title} {sol_num}"
-                            ptype, kw_matches = self._match_keywords(combined)
+                    time.sleep(0.5)  # Rate limit
 
-                            # Extract location from placeOfPerformance
-                            pop = opp.get("placeOfPerformance", {}) or {}
-                            pop_city = ""
-                            pop_state = state
-                            if isinstance(pop.get("city"), dict):
-                                pop_city = pop["city"].get("name", "")
-                            elif isinstance(pop.get("city"), str):
-                                pop_city = pop["city"]
-                            if isinstance(pop.get("state"), dict):
-                                pop_state = pop["state"].get("code", state)
+            except Exception as e:
+                logger.warning(f"SAM.gov NAICS {naics} error: {e}")
+                continue
 
-                            notice_id = opp.get("noticeId", "")
-                            ui_link = opp.get("uiLink", "")
-                            source_url = ui_link if ui_link else f"https://sam.gov/opp/{notice_id}/view"
+        logger.info(f"SAM.gov: {len(all_results)} raw results across {len(naics_codes)} NAICS codes")
+        return all_results
 
-                            # Extract contact info safely
-                            contacts = opp.get("pointOfContact", []) or []
-                            contact_name = ""
-                            contact_email = ""
-                            if contacts and isinstance(contacts, list):
-                                contact_name = contacts[0].get("fullName", "")
-                                contact_email = contacts[0].get("email", "")
+    def _parse_opportunity(self, opp: dict) -> Optional[BidOpportunity]:
+        title = opp.get("title", "")
+        desc = opp.get("description", "") or opp.get("fullParentPathName", "")
 
-                            bid = BidOpportunity(
-                                title=title,
-                                source="sam_gov",
-                                source_url=source_url,
-                                source_id=notice_id or self._generate_source_id("sam", title),
-                                description=f"Solicitation: {sol_num}" if sol_num else "",
-                                project_type=ptype,
-                                naics_code=naics,
-                                location_city=pop_city,
-                                location_state=pop_state,
-                                posted_date=opp.get("postedDate", ""),
-                                due_date=opp.get("responseDeadLine", ""),
-                                contact_name=contact_name,
-                                contact_email=contact_email,
-                                agency_name=opp.get("fullParentPathName", ""),
-                                set_aside=opp.get("typeOfSetAsideDescription", ""),
-                                solicitation_type=opp.get("type", ""),
-                                keyword_matches=kw_matches,
-                                scraped_at=datetime.now().isoformat(),
-                            )
-                            results.append(bid)
-                        except Exception as e:
-                            print(f"    [SAM.gov] Error parsing opportunity: {e}")
+        # Skip non-construction unless it matches our keywords
+        if not self._is_construction_related(f"{title} {desc}"):
+            if not self._extract_keywords(f"{title} {desc}"):
+                return None
 
-                    time.sleep(1)  # Rate limiting
+        # Extract location
+        place = opp.get("officeAddress", {})
+        loc = {
+            "city": place.get("city", ""),
+            "state": place.get("state", ""),
+            "zip": place.get("zip", ""),
+        }
 
-                except requests.exceptions.HTTPError as e:
-                    if e.response is not None and e.response.status_code == 404:
-                        # 404 = no results for this NAICS/state combo, not an error
-                        pass
-                    elif e.response is not None and e.response.status_code == 403:
-                        print(f"    [SAM.gov] API key may be invalid or expired (403)")
-                        raise  # Propagate to trigger retry
-                    elif e.response is not None and e.response.status_code == 429:
-                        print(f"    [SAM.gov] Rate limited - waiting 10s...")
-                        time.sleep(10)
-                    else:
-                        print(f"    [SAM.gov] HTTP error for {state}/{naics}: {e}")
-                        # Continue to next combination
-                except requests.exceptions.ConnectionError:
-                    print(f"    [SAM.gov] Connection error - will retry")
-                    raise  # Propagate for retry
-                except requests.exceptions.Timeout:
-                    print(f"    [SAM.gov] Timeout for {state}/{naics}")
-                    # Continue to next combination
+        # Determine project type from NAICS + keywords
+        naics = opp.get("naicsCode", "")
+        project_type = self._classify_project_type(title, desc, naics)
 
-        print(f"    [SAM.gov] Total results: {len(results)}")
-        self.results = results
-        return results
+        bid = BidOpportunity(
+            title=self._clean_text(title),
+            source="SAM.gov",
+            source_url=f"https://sam.gov/opp/{opp.get('noticeId', '')}/view",
+            source_id=opp.get("noticeId", ""),
+            description=self._clean_text(desc[:2000]),
+            project_type=project_type,
+            naics_code=naics,
+            location_city=loc["city"],
+            location_state=loc["state"],
+            location_zip=loc["zip"],
+            posted_date=opp.get("postedDate", ""),
+            due_date=opp.get("responseDeadLine", ""),
+            agency=opp.get("fullParentPathName", ""),
+            issuing_office=opp.get("officeTitle", ""),
+            set_aside=opp.get("typeOfSetAside", ""),
+            contract_type=opp.get("typeOfSolicitation", ""),
+            solicitation_type=opp.get("solicitationNumber", ""),
+            contact_name=opp.get("pointOfContact", [{}])[0].get("fullName", "") if opp.get("pointOfContact") else "",
+            contact_email=opp.get("pointOfContact", [{}])[0].get("email", "") if opp.get("pointOfContact") else "",
+            contact_phone=opp.get("pointOfContact", [{}])[0].get("phone", "") if opp.get("pointOfContact") else "",
+            keyword_matches=self._extract_keywords(f"{title} {desc}"),
+        )
+
+        # Check for bonding language in description
+        desc_lower = desc.lower()
+        if "bond" in desc_lower or "surety" in desc_lower:
+            bid.bonding_required = True
+            amount = self._parse_money(desc)
+            if amount:
+                bid.bonding_amount = amount
+
+        return bid
+
+    def _classify_project_type(self, title: str, desc: str, naics: str) -> str:
+        combined = f"{title} {desc}".lower()
+        if any(kw.lower() in combined for kw in KEYWORDS["waterproofing"][:15]):
+            return "waterproofing"
+        if any(kw.lower() in combined for kw in KEYWORDS["tenant_improvements"][:10]):
+            return "tenant_improvements"
+        if any(kw.lower() in combined for kw in KEYWORDS.get("civil_infrastructure", [])[:10]):
+            return "civil_infrastructure"
+        if any(kw.lower() in combined for kw in KEYWORDS.get("commercial_private", [])[:10]):
+            return "commercial_private"
+        return "general_contracting"
 
 
-# ============================================================
-# DC OFFICE OF CONTRACTING AND PROCUREMENT (ArcGIS REST API)
-# ============================================================
+# ─── DC OCP ─────────────────────────────────────────────────────────
+class DcOcpScraper(BaseScraper):
+    """DC Office of Contracting & Procurement via ArcGIS REST API."""
 
-class DCOCPScraper(BaseScraper):
-    """
-    Uses DC's Open Data ArcGIS REST API to fetch solicitations.
-    This is a real JSON API - no HTML scraping needed.
-    Data source: https://opendata.dc.gov/datasets/solicitations-from-pass
-    """
-
-    API_URL = (
-        "https://maps2.dcgis.dc.gov/dcgis/rest/services/"
-        "DCGIS_DATA/Government_Operations/MapServer/19/query"
-    )
+    API_URL = "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Government_Procurement_Layers/MapServer/0/query"
 
     def scrape(self) -> List[BidOpportunity]:
         results = []
+        try:
+            params = {
+                "where": "STATUS='Open' AND (CATEGORY LIKE '%Construction%' OR CATEGORY LIKE '%Building%' OR CATEGORY LIKE '%Renovation%')",
+                "outFields": "*",
+                "f": "json",
+                "resultRecordCount": 200,
+            }
+            data = self._fetch_json(self.API_URL, params)
 
-        params = {
-            "where": "1=1",
-            "outFields": "*",
-            "f": "json",
-            "resultRecordCount": 200,
-            "orderByFields": "OBJECTID DESC",
-        }
+            for feature in data.get("features", []):
+                attr = feature.get("attributes", {})
+                bid = self._parse_feature(attr)
+                if bid:
+                    results.append(bid)
 
-        print(f"    [DC OCP] Querying ArcGIS API...")
-        resp = self._fetch(self.API_URL, params=params)
-        data = resp.json()
+        except Exception as e:
+            logger.error(f"DC OCP error: {e}")
+            raise
 
-        features = data.get("features", [])
-        print(f"    [DC OCP] Got {len(features)} solicitations from API")
-
-        for feature in features:
-            try:
-                attrs = feature.get("attributes", {})
-                title = attrs.get("SOLICITATIONTITLE", "") or ""
-                sol_number = attrs.get("SOLICITATIONNUMBER", "") or ""
-                agency = attrs.get("AGENCY_NAME", "") or ""
-                agency_acronym = attrs.get("AGENCY_ACRONYM", "") or ""
-
-                combined = f"{title} {agency}"
-
-                # Filter for construction-related
-                if not self._is_construction_related(combined):
-                    continue
-
-                ptype, kw_matches = self._match_keywords(combined)
-
-                # Build source URL - use search with solicitation number
-                if sol_number:
-                    source_url = (
-                        f"https://contracts.ocp.dc.gov/solicitations/search"
-                        f"?keyword={quote(sol_number)}"
-                    )
-                else:
-                    source_url = (
-                        f"https://contracts.ocp.dc.gov/solicitations/search"
-                        f"?keyword={quote(title[:50])}"
-                    )
-
-                bid = BidOpportunity(
-                    title=title,
-                    source="dc_ocp",
-                    source_url=source_url,
-                    source_id=sol_number or self._generate_source_id("dc_ocp", title),
-                    description=f"Agency: {agency} ({agency_acronym})" if agency else "",
-                    project_type=ptype,
-                    location_state="DC",
-                    agency_name=agency or "DC Office of Contracting and Procurement",
-                    keyword_matches=kw_matches,
-                    scraped_at=datetime.now().isoformat(),
-                )
-                results.append(bid)
-
-            except Exception as e:
-                print(f"    [DC OCP] Error parsing solicitation: {e}")
-
-        print(f"    [DC OCP] Construction-related: {len(results)}")
-        self.results = results
         return results
 
+    def _parse_feature(self, attr: dict) -> Optional[BidOpportunity]:
+        title = attr.get("SUBJECT", "") or attr.get("TITLE", "")
+        desc = attr.get("DESCRIPTION", "") or ""
 
-# ============================================================
-# MONTGOMERY COUNTY MD (Socrata Open Data JSON API)
-# ============================================================
+        if not self._is_construction_related(f"{title} {desc}"):
+            if not self._extract_keywords(f"{title} {desc}"):
+                return None
 
+        # Parse dates (epoch ms)
+        due_date = ""
+        if attr.get("CLOSEDATE"):
+            try:
+                due_date = datetime.fromtimestamp(attr["CLOSEDATE"] / 1000).strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                pass
+
+        posted_date = ""
+        if attr.get("OPENDATE"):
+            try:
+                posted_date = datetime.fromtimestamp(attr["OPENDATE"] / 1000).strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                pass
+
+        return BidOpportunity(
+            title=self._clean_text(title),
+            source="DC OCP",
+            source_url=attr.get("LINK", ""),
+            source_id=str(attr.get("SOLICITATION_NUMBER", "")),
+            description=self._clean_text(desc[:2000]),
+            project_type=self._classify_dc_type(title, desc),
+            location_city="Washington",
+            location_state="DC",
+            posted_date=posted_date,
+            due_date=due_date,
+            agency=attr.get("AGENCY", ""),
+            set_aside=attr.get("SETASIDE", ""),
+            contact_name=attr.get("CONTACT_NAME", ""),
+            contact_email=attr.get("CONTACT_EMAIL", ""),
+            keyword_matches=self._extract_keywords(f"{title} {desc}"),
+        )
+
+    def _classify_dc_type(self, title: str, desc: str) -> str:
+        combined = f"{title} {desc}".lower()
+        if any(kw.lower() in combined for kw in KEYWORDS["waterproofing"][:10]):
+            return "waterproofing"
+        if any(kw.lower() in combined for kw in KEYWORDS["tenant_improvements"][:10]):
+            return "tenant_improvements"
+        return "general_contracting"
+
+
+# ─── Montgomery County MD ───────────────────────────────────────────
 class MontgomeryCountyScraper(BaseScraper):
-    """
-    Montgomery County MD publishes solicitations via Socrata Open Data.
-    Returns structured JSON — no HTML scraping needed.
-    Dataset: https://data.montgomerycountymd.gov/Government/Active-Solicitations
-    """
+    """Montgomery County via Socrata Open Data API."""
+
+    API_URL = "https://data.montgomerycountymd.gov/resource/dvhm-nmvt.json"
 
     def scrape(self) -> List[BidOpportunity]:
         results = []
+        try:
+            params = {
+                "$where": "status='Active' OR status='Open'",
+                "$limit": 200,
+                "$order": "posting_date DESC",
+            }
+            data = self._fetch_json(self.API_URL, params)
 
-        api_url = self.config.get(
-            "api_url",
-            "https://data.montgomerycountymd.gov/resource/m3ju-5p4v.json"
-        )
-
-        params = {
-            "$where": "status='Active'",
-            "$order": "issuancedate DESC",
-            "$limit": 200,
-        }
-
-        print(f"    [MoCo MD] Querying Socrata API...")
-        resp = self._fetch(api_url, params=params)
-        data = resp.json()
-
-        print(f"    [MoCo MD] Got {len(data)} active solicitations from API")
-
-        for record in data:
-            try:
-                title = record.get("description", "") or ""
-                sol_number = record.get("number", "") or ""
-                agency = record.get("department", "") or ""
-                is_construction = record.get("construction", "")
-
-                combined = f"{title} {agency} {sol_number}"
-
-                # Use the construction flag if available, else keyword match
-                if is_construction != "Y" and not self._is_construction_related(combined):
-                    continue
-
-                ptype, kw_matches = self._match_keywords(combined)
-
-                # Build URL to the county solicitation page
-                source_url = self.config.get("base_url", "")
-
-                bid = BidOpportunity(
-                    title=title or sol_number,
-                    source="montgomery_county",
-                    source_url=source_url,
-                    source_id=sol_number or self._generate_source_id("moco", title),
-                    description=f"Agency: {agency}" if agency else "",
-                    project_type=ptype,
-                    location_county="Montgomery County",
-                    location_state="MD",
-                    agency_name=agency or "Montgomery County MD",
-                    posted_date=record.get("issuancedate", ""),
-                    due_date=record.get("closingdate", ""),
-                    keyword_matches=kw_matches,
-                    scraped_at=datetime.now().isoformat(),
-                )
-                results.append(bid)
-
-            except Exception as e:
-                print(f"    [MoCo MD] Error parsing record: {e}")
-
-        print(f"    [MoCo MD] Construction-related: {len(results)}")
-        self.results = results
-        return results
-
-
-# ============================================================
-# eVA VIRGINIA SCRAPER
-# ============================================================
-
-class EVAScraper(BaseScraper):
-    """
-    Scrapes eVA Virginia Business Opportunities (VBO) at mvendor.cgieva.com.
-    This is the public posting page for Virginia state procurement.
-    Note: Page may use AJAX to load data - if no results are parsed,
-    the page likely requires JavaScript rendering.
-    """
-
-    def scrape(self) -> List[BidOpportunity]:
-        results = []
-        base_url = self.config.get("base_url")
-
-        # eVA is a JSP page that may need JS rendering
-        print(f"    [eVA] Fetching {base_url}...")
-        full_url = f"{base_url}?status=Open"
-        soup, used_browser = self._fetch_smart(full_url)
-        if used_browser:
-            print(f"    [eVA] Rendered with browser")
-
-        # eVA uses JSP pages - try multiple parsing strategies
-        listings = self._find_links_broad(soup)
-        print(f"    [eVA] Found {len(listings)} links on page")
-
-        for item in listings:
-            try:
-                title = item["title"]
-                href = item["href"]
-                extra = item.get("extra_text", "")
-                combined = f"{title} {extra}"
-
-                # Filter for construction-related content
-                if not self._is_construction_related(combined):
-                    continue
-
-                link = self._make_detail_url(base_url, href)
-                ptype, kw_matches = self._match_keywords(combined)
-                loc = self._match_location(combined)
-
-                bid = BidOpportunity(
-                    title=title,
-                    source="eva",
-                    source_url=link,
-                    source_id=self._generate_source_id("eva", title, href),
-                    description=self._clean_text(extra)[:2000],
-                    project_type=ptype,
-                    location_city=loc.get("city", ""),
-                    location_county=loc.get("county", ""),
-                    location_state="VA",
-                    keyword_matches=kw_matches,
-                    scraped_at=datetime.now().isoformat(),
-                )
-                results.append(bid)
-            except Exception as e:
-                print(f"    [eVA] Error parsing listing: {e}")
-
-        if not results:
-            body_text = soup.get_text(strip=True)
-            if len(body_text) < 500:
-                print(f"    [eVA] Page has very little content - may need JavaScript.")
-            else:
-                print(f"    [eVA] Page has content but no construction bids matched filters.")
-            print(f"    [eVA] Browse manually: {base_url}")
-
-        print(f"    [eVA] Construction-related results: {len(results)}")
-        self.results = results
-        return results
-
-
-# ============================================================
-# COUNTY PROCUREMENT SCRAPER (Generic HTML)
-# ============================================================
-
-class CountyScraper(BaseScraper):
-    """
-    Generic scraper for county procurement pages.
-    Uses broad CSS selectors and multiple parsing strategies
-    to handle different page structures.
-    """
-
-    # Navigation / informational link patterns to reject
-    _SKIP_PATTERNS = [
-        "login", "sign in", "sign up", "register", "contact us",
-        "home", "about us", "faq", "help", "privacy",
-        "terms of", "sitemap", "search", "menu", "navigation",
-        "skip to", "accessibility", "translate", "language",
-        "facebook", "twitter", "instagram", "youtube", "linkedin",
-        "subscribe", "newsletter", "calendar", "events",
-        "how to", "learn more", "read more", "click here",
-        "departments", "directory", "staff", "employee",
-        "pay online", "report a", "request a", "submit a",
-        "map", "hours of operation", "location",
-        "news", "press release", "meeting",
-        "download", "forms", "application form",
-        "job", "career", "employment", "human resources",
-        "agendas", "minutes", "board meeting",
-        "code of ordinances", "zoning",
-        "parks", "recreation", "library",
-        "utility", "trash", "recycling", "water bill",
-        "permits", "licenses", "inspections",
-        "budget report", "financial report", "annual report",
-        "view all", "see all", "show all", "back to", "return to",
-        "vendor registration", "vendor self-service",
-        "copyright", "powered by", "all rights reserved",
-        "share this", "print this", "email this",
-        # Section headers that are NOT actual bids
-        "awarded bids", "current bids", "closed bids", "open bids",
-        "bid opening", "bid results", "bid tabulation",
-        "bid opportunities", "archived bids", "expired bids",
-        "past bids", "active bids", "upcoming bids",
-        "collaboration portal", "procurement portal",
-        "vendor portal", "supplier portal", "bidder portal",
-        "formal solicitations", "informal solicitations",
-        "results and awards", "award results",
-        "how to bid", "bidding process",
-        "procurement home", "purchasing home",
-    ]
-
-    # Patterns that strongly indicate a real bid/solicitation listing
-    _BID_INDICATORS = [
-        "solicitation", "rfp", "rfq", "ifb", "itb",
-        "invitation for bid", "request for proposal",
-        "request for quote", "request for qualification",
-    ]
-
-    # Titles that are just section headers, not real listings
-    _SECTION_HEADER_PATTERNS = re.compile(
-        r'^(?:awarded|current|closed|open|active|past|archived|expired|upcoming)\s+bids?$'
-        r'|^bid\s+(?:opening|results?|tabulation|opportunities|list)',
-        re.IGNORECASE,
-    )
-
-    def _looks_like_bid_listing(self, title, combined):
-        """Check if a link looks like an actual bid/solicitation listing."""
-        title_lower = title.lower()
-        combined_lower = combined.lower()
-
-        # Reject known section header patterns (e.g. "Awarded Bids", "Current Bids")
-        if self._SECTION_HEADER_PATTERNS.search(title):
-            return False
-
-        # Strong signal: bid indicator in the TITLE itself (not just surrounding page text)
-        if any(ind in title_lower for ind in self._BID_INDICATORS):
-            return True
-
-        # Strong signal: has a solicitation number pattern in TITLE
-        # e.g. "IFB-2024-001", "RFP 24-12", "Bid #2024-0042", "Sol. 25-001"
-        if re.search(r'(?:IFB|RFP|RFQ|ITB|SOL|BID)[\s#.-]*\d', title, re.IGNORECASE):
-            return True
-
-        # Strong signal: has a reference number like "24-0012" or "#2024-042" or "PC #194-18537"
-        if re.search(r'#?\d{2,4}[-]\d{2,}', title):
-            return True
-
-        # Medium signal: construction-related AND substantive title (not just a nav link)
-        if len(title) >= 25 and self._is_construction_related(combined):
-            return True
-
-        # Weak signal: title contains "bid" + is long enough to be a real listing
-        if len(title) >= 30 and re.search(r'\bbids?\b', title_lower):
-            return True
-
-        return False
-
-    def scrape(self) -> List[BidOpportunity]:
-        results = []
-        base_url = self.config.get("base_url")
-        name = self.config.get("name", self.source_key)
-
-        print(f"    [{name}] Fetching {base_url}...")
-        soup, used_browser = self._fetch_smart(base_url)
-        if used_browser:
-            print(f"    [{name}] Rendered with browser")
-
-        # Remove nav, header, footer, sidebar to reduce noise
-        for tag in soup.select(
-            "nav, header, footer, .nav, .header, .footer, "
-            "#nav, #header, #footer, .menu, .sidebar, "
-            ".breadcrumb, .pagination, .social-links, "
-            "#breadcrumb, .dropdown-menu, .mega-menu"
-        ):
-            tag.decompose()
-
-        # Use broad link-finding strategy
-        listings = self._find_links_broad(soup)
-        print(f"    [{name}] Found {len(listings)} links on page")
-
-        for item in listings:
-            try:
-                title = item["title"]
-                href = item["href"]
-                extra = item.get("extra_text", "")
-                combined = f"{title} {extra}"
-
-                # --- Reject obvious non-bid links ---
-                if len(title) < 10:
-                    continue
-                if any(p in title.lower() for p in self._SKIP_PATTERNS):
-                    continue
-
-                # --- Must look like a real bid listing ---
-                if not self._looks_like_bid_listing(title, combined):
-                    continue
-
-                link = self._make_detail_url(base_url, href)
-                ptype, kw_matches = self._match_keywords(combined)
-
-                county_name = name.replace(" Procurement", "")
-                state = self.config.get("state", "VA")
-
-                bid = BidOpportunity(
-                    title=title,
-                    source=self.source_key,
-                    source_url=link,
-                    source_id=self._generate_source_id(self.source_key, title),
-                    project_type=ptype,
-                    location_county=county_name,
-                    location_state=state,
-                    agency_name=county_name,
-                    keyword_matches=kw_matches,
-                    scraped_at=datetime.now().isoformat(),
-                )
-                results.append(bid)
-            except Exception as e:
-                print(f"    [{name}] Error parsing listing: {e}")
-
-        if not results:
-            body_text = soup.get_text(strip=True)
-            if len(body_text) < 500:
-                print(f"    [{name}] Page has very little content - may need JavaScript.")
-            else:
-                print(f"    [{name}] Page has content but no bid listings matched filters.")
-                sample_links = [item["title"][:60] for item in listings[:5]]
-                if sample_links:
-                    print(f"    [{name}] Sample links found: {sample_links}")
-
-        print(f"    [{name}] Bid-related results: {len(results)}")
-        self.results = results
-        return results
-
-
-# ============================================================
-# BUILDING PERMIT SCRAPER
-# ============================================================
-
-class PermitScraper(BaseScraper):
-    """Scrapes building permit data for upcoming project leads."""
-
-    def scrape(self) -> List[BidOpportunity]:
-        results = []
-        base_url = self.config.get("base_url")
-        name = self.config.get("name", self.source_key)
-
-        print(f"    [{name}] Fetching {base_url}...")
-        soup, used_browser = self._fetch_smart(base_url)
-        if used_browser:
-            print(f"    [{name}] Rendered with browser")
-
-        # Look for tables with permit data
-        commercial_terms = [
-            "commercial", "office", "retail", "industrial",
-            "renovation", "alteration", "addition", "new construction",
-            "tenant", "buildout", "remodel", "restaurant",
-            "medical", "dental", "mixed use", "multi-family",
-            "parking", "warehouse", "institutional", "municipal",
-            "church", "school", "hospital", "hotel",
-        ]
-
-        for table in soup.select("table"):
-            rows = table.select("tr")
-            if len(rows) < 2:
-                continue
-            for row in rows[1:]:  # Skip header
-                cells = row.select("td")
-                if len(cells) < 2:
-                    continue
-                try:
-                    text = " ".join(c.get_text(strip=True) for c in cells)
-                    if not any(term in text.lower() for term in commercial_terms):
-                        continue
-
-                    title = self._clean_text(cells[0].get_text()) if cells else ""
-                    ptype, kw_matches = self._match_keywords(text)
-                    loc = self._match_location(text)
-
-                    bid = BidOpportunity(
-                        title=f"[PERMIT] {title}",
-                        source=self.source_key,
-                        source_url=base_url,
-                        source_id=self._generate_source_id(self.source_key, text[:100]),
-                        description=self._clean_text(text)[:2000],
-                        project_type=ptype,
-                        location_city=loc.get("city", ""),
-                        location_county=loc.get("county", ""),
-                        location_state="VA",
-                        keyword_matches=kw_matches,
-                        category_tags=["permit_lead"],
-                        scraped_at=datetime.now().isoformat(),
-                    )
+            for item in data:
+                bid = self._parse_item(item)
+                if bid:
                     results.append(bid)
-                except Exception as e:
-                    print(f"    [{name}] Error parsing permit row: {e}")
 
-        if not results:
-            print(f"    [{name}] No permit tables found - site may need JavaScript.")
+        except Exception as e:
+            logger.error(f"Montgomery County error: {e}")
+            raise
 
-        print(f"    [{name}] Permit results: {len(results)}")
-        self.results = results
         return results
 
+    def _parse_item(self, item: dict) -> Optional[BidOpportunity]:
+        title = item.get("title", "") or item.get("solicitation_title", "")
+        desc = item.get("description", "") or ""
 
-# ============================================================
-# BIDNET DIRECT SCRAPER (Authenticated Session)
-# ============================================================
+        if not self._is_construction_related(f"{title} {desc}"):
+            if not self._extract_keywords(f"{title} {desc}"):
+                return None
 
-class BidNetScraper(BaseScraper):
-    """
-    Scrapes BidNet Direct using authenticated session login.
-    Credentials: BIDNET_EMAIL / BIDNET_PASSWORD env vars, or via Settings page.
-    Login is required to access full bid listings and documents.
-    """
+        return BidOpportunity(
+            title=self._clean_text(title),
+            source="Montgomery County",
+            source_url=item.get("url", ""),
+            source_id=item.get("solicitation_number", ""),
+            description=self._clean_text(desc[:2000]),
+            location_city="Rockville",
+            location_county="Montgomery County",
+            location_state="MD",
+            posted_date=item.get("posting_date", "")[:10] if item.get("posting_date") else "",
+            due_date=item.get("closing_date", "")[:10] if item.get("closing_date") else "",
+            agency="Montgomery County",
+            contact_name=item.get("contact_name", ""),
+            contact_email=item.get("contact_email", ""),
+            keyword_matches=self._extract_keywords(f"{title} {desc}"),
+        )
 
-    LOGIN_URL = "https://www.bidnetdirect.com/public/authentication/login"
-    BIDS_URL = "https://www.bidnetdirect.com/virginia/solicitations/open-bids"
 
-    def _login(self) -> bool:
-        """Authenticate with BidNet Direct. Returns True on success."""
-        email = os.environ.get("BIDNET_EMAIL", "")
-        password = os.environ.get("BIDNET_PASSWORD", "")
+# ─── eVA Virginia ───────────────────────────────────────────────────
+class EvaScraper(BaseScraper):
+    """Virginia eVA procurement portal."""
 
-        if not email or not password:
-            print("    [BidNet] No credentials found.")
-            print("    [BidNet] Set BIDNET_EMAIL and BIDNET_PASSWORD in Settings or env vars.")
-            return False
-
-        # Use realistic browser headers to avoid bot detection
-        self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-        })
-
-        # Step 1: GET login page to get session cookies and CSRF token
-        print("    [BidNet] Loading login page...")
-        try:
-            login_page = self.session.get(self.LOGIN_URL, timeout=20)
-            login_page.raise_for_status()
-        except Exception as e:
-            print(f"    [BidNet] Failed to load login page: {e}")
-            return False
-
-        # Extract CSRF token from the login form
-        soup = BeautifulSoup(login_page.text, "lxml")
-        csrf_token = ""
-        csrf_input = soup.select_one('input[name="_csrf"]') or soup.select_one('input[name="csrf"]')
-        if csrf_input:
-            csrf_token = csrf_input.get("value", "")
-
-        # Also check for meta tag CSRF
-        if not csrf_token:
-            csrf_meta = soup.select_one('meta[name="_csrf"]') or soup.select_one('meta[name="csrf-token"]')
-            if csrf_meta:
-                csrf_token = csrf_meta.get("content", "")
-
-        # Step 2: POST login credentials
-        print("    [BidNet] Submitting login...")
-        login_data = {
-            "email": email,
-            "password": password,
-        }
-        if csrf_token:
-            login_data["_csrf"] = csrf_token
-
-        try:
-            resp = self.session.post(
-                self.LOGIN_URL,
-                data=login_data,
-                timeout=20,
-                allow_redirects=True,
-            )
-            # Check if login succeeded (redirected away from login page, or got 200 on dashboard)
-            if "login" in resp.url.lower() and resp.status_code == 200:
-                # Still on login page — check for error messages
-                error_soup = BeautifulSoup(resp.text, "lxml")
-                error_msg = error_soup.select_one(".alert-danger, .error-message, .login-error")
-                if error_msg:
-                    print(f"    [BidNet] Login failed: {error_msg.get_text(strip=True)}")
-                else:
-                    print("    [BidNet] Login may have failed (still on login page)")
-                return False
-
-            print(f"    [BidNet] Login successful (redirected to {resp.url[:60]}...)")
-            return True
-
-        except Exception as e:
-            print(f"    [BidNet] Login request failed: {e}")
-            return False
+    BASE_URL = "https://eva.virginia.gov"
 
     def scrape(self) -> List[BidOpportunity]:
         results = []
+        try:
+            # Try requests first
+            soup = self._fetch_html(f"{self.BASE_URL}/pages/eva-public-portal.htm")
 
-        email = os.environ.get("BIDNET_EMAIL", "")
-        password = os.environ.get("BIDNET_PASSWORD", "")
+            # Look for solicitation links
+            links = soup.find_all("a", href=True)
+            sol_links = [
+                l for l in links
+                if any(term in (l.text or "").lower()
+                       for term in ["solicitation", "bid", "rfp", "ifb", "construction"])
+            ]
 
-        # Strategy 1: Use browser with login (best results)
-        if HAS_BROWSER and email and password:
-            print("    [BidNet] Using browser with login...")
-            try:
-                html = browser_fetch_with_login(
-                    login_url=self.LOGIN_URL,
-                    target_url=self.BIDS_URL,
-                    email=email,
-                    password=password,
+            if not sol_links:
+                # Try browser fallback
+                soup = self._browser_fetch(
+                    f"{self.BASE_URL}/pages/eva-public-portal.htm",
+                    wait_for="table"
                 )
-                soup = BeautifulSoup(html, "lxml")
-                print(f"    [BidNet] Browser rendered {len(html)} bytes")
-            except Exception as e:
-                print(f"    [BidNet] Browser login failed: {e}")
-                soup = None
-        # Strategy 2: Use browser without login (public page)
-        elif HAS_BROWSER:
-            print("    [BidNet] Using browser (no credentials)...")
-            try:
-                soup = self._fetch_with_browser(self.BIDS_URL)
-            except Exception as e:
-                print(f"    [BidNet] Browser fetch failed: {e}")
-                soup = None
-        else:
-            soup = None
+                if soup:
+                    sol_links = soup.find_all("a", href=True)
 
-        # Strategy 3: Fall back to requests
-        if soup is None:
-            logged_in = self._login()
-            if not logged_in:
-                print("    [BidNet] Falling back to public page scraping...")
-            print(f"    [BidNet] Fetching open solicitations...")
-            try:
-                resp = self._fetch(self.BIDS_URL, timeout=20)
-            except requests.exceptions.HTTPError as e:
-                if e.response is not None and e.response.status_code == 403:
-                    print("    [BidNet] Access blocked (403). Needs browser or credentials.")
-                    return []
-                raise
-            print(f"    [BidNet] Response: {resp.status_code}, size: {len(resp.text)} bytes")
-            soup = BeautifulSoup(resp.text, "lxml")
-
-        # Remove navigation noise
-        for tag in soup.select("nav, header, footer, .nav, .header, .footer, .sidebar"):
-            tag.decompose()
-
-        # BidNet lists solicitations in table rows or div cards
-        # Strategy 1: Look for solicitation table rows
-        bid_rows = soup.select("table tr, .solicitation-row, .bid-item, .sol-item")
-        if not bid_rows:
-            # Strategy 2: Look for cards/divs with bid data
-            bid_rows = soup.select("div.row, div.card, div.item, article, li.list-group-item")
-
-        print(f"    [BidNet] Found {len(bid_rows)} potential listing elements")
-
-        for row in bid_rows:
-            try:
-                # Find the main link
-                link_tag = row.select_one("a[href]")
-                if not link_tag:
-                    continue
-
-                title = link_tag.get_text(strip=True)
-                href = link_tag.get("href", "")
-
-                if not title or len(title) < 10 or not self._is_valid_href(href):
-                    continue
-
-                # Get all text from the row for context
-                row_text = row.get_text(strip=True)
-                combined = f"{title} {row_text}"
-
-                # Skip navigation links
-                if any(p in title.lower() for p in CountyScraper._SKIP_PATTERNS):
-                    continue
-
-                # Filter: must be construction-related OR have bid indicators
-                is_bid = any(ind in combined.lower() for ind in CountyScraper._BID_INDICATORS)
-                is_construction = self._is_construction_related(combined)
-                if not is_bid and not is_construction:
-                    continue
-
-                detail_url = self._make_detail_url("https://www.bidnetdirect.com", href)
-                ptype, kw_matches = self._match_keywords(combined)
-                loc = self._match_location(combined)
-
-                # Try to extract closing date from the row
-                due_date = ""
-                date_match = re.search(
-                    r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', row_text
-                )
-                if date_match:
-                    due_date = date_match.group(1)
-
-                # Try to extract agency/org name
-                agency = ""
-                org_el = row.select_one(".org-name, .agency, .buyer-name, td:nth-of-type(2)")
-                if org_el and org_el != link_tag:
-                    agency = org_el.get_text(strip=True)
-
-                bid = BidOpportunity(
-                    title=title,
-                    source="bidnet_direct",
-                    source_url=detail_url,
-                    source_id=self._generate_source_id("bidnet", title, href),
-                    project_type=ptype,
-                    location_city=loc.get("city", ""),
-                    location_county=loc.get("county", ""),
-                    location_state=loc.get("state", "VA"),
-                    due_date=due_date,
-                    agency_name=agency,
-                    keyword_matches=kw_matches,
-                    scraped_at=datetime.now().isoformat(),
-                )
-                results.append(bid)
-
-            except Exception as e:
-                print(f"    [BidNet] Error parsing row: {e}")
-
-        # If no structured results, try the generic broad strategy
-        if not results:
-            print("    [BidNet] No structured bids found, trying broad link scan...")
-            listings = self._find_links_broad(soup)
-            for item in listings:
-                try:
-                    title = item["title"]
-                    href = item["href"]
-                    extra = item.get("extra_text", "")
-                    combined = f"{title} {extra}"
-
-                    if len(title) < 15:
-                        continue
-                    if any(p in title.lower() for p in CountyScraper._SKIP_PATTERNS):
-                        continue
-                    if not self._is_construction_related(combined):
-                        continue
-
-                    detail_url = self._make_detail_url("https://www.bidnetdirect.com", href)
-                    ptype, kw_matches = self._match_keywords(combined)
-
-                    bid = BidOpportunity(
-                        title=title,
-                        source="bidnet_direct",
-                        source_url=detail_url,
-                        source_id=self._generate_source_id("bidnet", title, href),
-                        project_type=ptype,
-                        location_state="VA",
-                        keyword_matches=kw_matches,
-                        scraped_at=datetime.now().isoformat(),
-                    )
+            for link in sol_links[:50]:
+                bid = self._parse_listing(link, soup)
+                if bid:
                     results.append(bid)
-                except Exception as e:
-                    print(f"    [BidNet] Error parsing listing: {e}")
-
-        if not results:
-            body = soup.get_text(strip=True)
-            if len(body) < 1000:
-                print("    [BidNet] Page has minimal content - may need JavaScript rendering.")
-            else:
-                print("    [BidNet] Page has content but no construction bids matched filters.")
-
-        print(f"    [BidNet] Construction-related results: {len(results)}")
-        self.results = results
-        return results
-
-
-# ============================================================
-# OPENGOV PROCUREMENT SCRAPER (Authenticated Session)
-# ============================================================
-
-class OpenGovScraper(BaseScraper):
-    """
-    Scrapes OpenGov Procurement vendor portal.
-    Platform: procurement.opengov.com (React SPA)
-
-    Strategy:
-    1. Login via form POST to get session cookies
-    2. Hit internal API endpoints the React frontend uses
-    3. Fall back to embed pages for known agencies
-    4. Parse whatever HTML/JSON we can get
-
-    Credentials: OPENGOV_EMAIL / OPENGOV_PASSWORD env vars, or Settings page.
-    """
-
-    BASE = "https://procurement.opengov.com"
-    LOGIN_URL = "https://procurement.opengov.com/login"
-
-    # Vendor-specific open bids page (React SPA route)
-    VENDOR_ID = "410233"  # OAK Builders LLC vendor ID
-
-    # Known agencies in NOVA/DC/MD area that use OpenGov
-    EMBED_PORTALS = [
-        ("dc", "DC", "DC Dept of General Services"),
-    ]
-
-    def _get_browser_headers(self):
-        return {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                      "image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
-        }
-
-    def _login(self) -> bool:
-        """Authenticate with OpenGov Procurement. Returns True on success."""
-        email = os.environ.get("OPENGOV_EMAIL", "")
-        password = os.environ.get("OPENGOV_PASSWORD", "")
-
-        if not email or not password:
-            print("    [OpenGov] No credentials found.")
-            print("    [OpenGov] Set OPENGOV_EMAIL and OPENGOV_PASSWORD in Settings or env vars.")
-            return False
-
-        self.session.headers.update(self._get_browser_headers())
-
-        # Step 1: GET login page for cookies/CSRF
-        print("    [OpenGov] Loading login page...")
-        try:
-            login_page = self.session.get(self.LOGIN_URL, timeout=20)
-        except Exception as e:
-            print(f"    [OpenGov] Failed to load login page: {e}")
-            return False
-
-        if login_page.status_code == 403:
-            print("    [OpenGov] Login page blocked (403). Site requires full browser.")
-            return False
-
-        # Extract CSRF token
-        soup = BeautifulSoup(login_page.text, "lxml")
-        csrf_token = ""
-        for selector in [
-            'input[name="_csrf"]', 'input[name="csrf"]',
-            'input[name="authenticity_token"]', 'input[name="_token"]',
-        ]:
-            el = soup.select_one(selector)
-            if el:
-                csrf_token = el.get("value", "")
-                break
-        if not csrf_token:
-            meta = soup.select_one('meta[name="csrf-token"]')
-            if meta:
-                csrf_token = meta.get("content", "")
-
-        # Step 2: POST login
-        print("    [OpenGov] Submitting login...")
-        login_data = {"email": email, "password": password}
-        if csrf_token:
-            login_data["_csrf"] = csrf_token
-            login_data["authenticity_token"] = csrf_token
-
-        # Try form POST first
-        self.session.headers.update({
-            "Referer": self.LOGIN_URL,
-            "Origin": self.BASE,
-        })
-
-        try:
-            resp = self.session.post(
-                self.LOGIN_URL,
-                data=login_data,
-                timeout=20,
-                allow_redirects=True,
-            )
-
-            if resp.status_code == 403:
-                print("    [OpenGov] Login POST blocked (403).")
-                # Try JSON login as alternative (many React SPAs use JSON auth)
-                return self._try_json_login(email, password)
-
-            if "login" in resp.url.lower() and resp.status_code == 200:
-                print("    [OpenGov] Login may have failed (still on login page).")
-                return self._try_json_login(email, password)
-
-            print(f"    [OpenGov] Login successful (redirected to {resp.url[:60]})")
-            return True
 
         except Exception as e:
-            print(f"    [OpenGov] Login failed: {e}")
-            return False
-
-    def _try_json_login(self, email, password) -> bool:
-        """Try JSON-based login (common for React SPAs)."""
-        print("    [OpenGov] Trying JSON-based login...")
-
-        # Common API login endpoints for React apps
-        api_login_urls = [
-            f"{self.BASE}/api/auth/login",
-            f"{self.BASE}/api/v1/auth/login",
-            f"{self.BASE}/api/login",
-            f"{self.BASE}/auth/login",
-        ]
-
-        json_headers = {
-            **self._get_browser_headers(),
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-
-        for url in api_login_urls:
-            try:
-                resp = self.session.post(
-                    url,
-                    json={"email": email, "password": password},
-                    headers=json_headers,
-                    timeout=15,
-                    allow_redirects=False,
-                )
-                if resp.status_code in (200, 201, 302):
-                    print(f"    [OpenGov] JSON login succeeded at {url}")
-                    return True
-                if resp.status_code == 403:
-                    continue  # Try next endpoint
-            except Exception:
-                continue
-
-        print("    [OpenGov] All login methods blocked. Site likely requires full browser.")
-        return False
-
-    def _scrape_embed_portal(self, org_slug, state, agency_name) -> List[BidOpportunity]:
-        """Try scraping an agency's embed portal page."""
-        results = []
-        url = f"{self.BASE}/portal/embed/{org_slug}/project-list?status=all"
-
-        try:
-            resp = self.session.get(url, timeout=20)
-            if resp.status_code == 403:
-                print(f"    [OpenGov] Embed page blocked for {org_slug}")
-                return []
-
-            soup = BeautifulSoup(resp.text, "lxml")
-            body_text = soup.get_text(strip=True)
-
-            if len(body_text) < 500:
-                print(f"    [OpenGov] {org_slug} embed is JS-only (minimal HTML)")
-                return []
-
-            # Try to find project/bid listings
-            listings = self._find_links_broad(soup)
-            print(f"    [OpenGov] {org_slug} embed: {len(listings)} links found")
-
-            for item in listings:
-                title = item["title"]
-                href = item["href"]
-                extra = item.get("extra_text", "")
-                combined = f"{title} {extra}"
-
-                if len(title) < 10:
-                    continue
-                if any(p in title.lower() for p in CountyScraper._SKIP_PATTERNS):
-                    continue
-                if not self._is_construction_related(combined):
-                    continue
-
-                detail_url = self._make_detail_url(self.BASE, href)
-                ptype, kw_matches = self._match_keywords(combined)
-
-                bid = BidOpportunity(
-                    title=title,
-                    source="opengov",
-                    source_url=detail_url,
-                    source_id=self._generate_source_id("opengov", org_slug, title),
-                    project_type=ptype,
-                    location_state=state,
-                    agency_name=agency_name,
-                    keyword_matches=kw_matches,
-                    scraped_at=datetime.now().isoformat(),
-                )
-                results.append(bid)
-
-        except Exception as e:
-            print(f"    [OpenGov] Error scraping {org_slug}: {e}")
+            logger.error(f"eVA error: {e}")
+            raise
 
         return results
 
-    def _scrape_vendor_page(self) -> List[BidOpportunity]:
-        """Try scraping the authenticated vendor open-bids page."""
-        results = []
-        url = (
-            f"{self.BASE}/vendors/{self.VENDOR_ID}/open-bids"
-            f"?states=VA%2CDC%2CMD"
+    def _parse_listing(self, link, soup) -> Optional[BidOpportunity]:
+        title = self._clean_text(link.text)
+        if not title or len(title) < 5:
+            return None
+
+        url = urljoin(self.BASE_URL, link.get("href", ""))
+
+        # Try to find parent row for more data
+        parent_row = link.find_parent("tr")
+        desc = ""
+        due_date = ""
+        agency = ""
+
+        if parent_row:
+            cells = parent_row.find_all("td")
+            if len(cells) >= 3:
+                agency = self._clean_text(cells[1].text) if len(cells) > 1 else ""
+                due_date = self._clean_text(cells[-1].text)
+
+        if not self._is_construction_related(f"{title} {desc}"):
+            if not self._extract_keywords(f"{title} {desc}"):
+                return None
+
+        return BidOpportunity(
+            title=title,
+            source="eVA Virginia",
+            source_url=url,
+            description=desc,
+            location_state="VA",
+            due_date=due_date,
+            agency=agency or "Commonwealth of Virginia",
+            keyword_matches=self._extract_keywords(title),
         )
 
-        print(f"    [OpenGov] Fetching vendor bids page...")
-        try:
-            resp = self.session.get(url, timeout=20)
-        except Exception as e:
-            print(f"    [OpenGov] Failed to fetch vendor page: {e}")
-            return []
 
-        if resp.status_code == 403:
-            print("    [OpenGov] Vendor page blocked (403)")
-            return []
+# ─── eMMA Maryland (NEW) ────────────────────────────────────────────
+class EmmaScraper(BaseScraper):
+    """Maryland eMMA procurement portal."""
 
-        print(f"    [OpenGov] Vendor page: {resp.status_code}, {len(resp.text)} bytes")
-
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        # Remove nav noise
-        for tag in soup.select("nav, header, footer, .nav, .sidebar"):
-            tag.decompose()
-
-        # Try to find bid/project listings (React may have server-rendered some content)
-        listings = self._find_links_broad(soup)
-        print(f"    [OpenGov] Found {len(listings)} links on vendor page")
-
-        for item in listings:
-            try:
-                title = item["title"]
-                href = item["href"]
-                extra = item.get("extra_text", "")
-                combined = f"{title} {extra}"
-
-                if len(title) < 10:
-                    continue
-                if any(p in title.lower() for p in CountyScraper._SKIP_PATTERNS):
-                    continue
-
-                is_bid = any(ind in combined.lower() for ind in CountyScraper._BID_INDICATORS)
-                is_construction = self._is_construction_related(combined)
-                if not is_bid and not is_construction:
-                    continue
-
-                detail_url = self._make_detail_url(self.BASE, href)
-                ptype, kw_matches = self._match_keywords(combined)
-                loc = self._match_location(combined)
-
-                due_date = ""
-                date_match = re.search(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', extra)
-                if date_match:
-                    due_date = date_match.group(1)
-
-                bid = BidOpportunity(
-                    title=title,
-                    source="opengov",
-                    source_url=detail_url,
-                    source_id=self._generate_source_id("opengov", title, href),
-                    project_type=ptype,
-                    location_city=loc.get("city", ""),
-                    location_county=loc.get("county", ""),
-                    location_state=loc.get("state", "VA"),
-                    due_date=due_date,
-                    keyword_matches=kw_matches,
-                    scraped_at=datetime.now().isoformat(),
-                )
-                results.append(bid)
-            except Exception as e:
-                print(f"    [OpenGov] Error parsing listing: {e}")
-
-        return results
+    BASE_URL = "https://emma.maryland.gov"
 
     def scrape(self) -> List[BidOpportunity]:
         results = []
+        try:
+            search_url = f"{self.BASE_URL}/page.aspx/en/bpm/process_manage_main"
+            soup = self._fetch_html(search_url)
 
-        email = os.environ.get("OPENGOV_EMAIL", "")
-        password = os.environ.get("OPENGOV_PASSWORD", "")
-        vendor_url = (
-            f"{self.BASE}/vendors/{self.VENDOR_ID}/open-bids"
-            f"?states=VA%2CDC%2CMD"
-        )
+            # Look for open solicitations
+            # eMMA typically renders via JS, so try browser fallback
+            if not soup.find_all("table"):
+                soup = self._browser_fetch(search_url, wait_for="table")
 
-        # Strategy 1: Browser with login (best — renders the React SPA)
-        if HAS_BROWSER and email and password:
-            print("    [OpenGov] Using browser with login...")
-            try:
-                html = browser_fetch_with_login(
-                    login_url=self.LOGIN_URL,
-                    target_url=vendor_url,
-                    email=email,
-                    password=password,
-                )
-                soup = BeautifulSoup(html, "lxml")
-                print(f"    [OpenGov] Browser rendered {len(html)} bytes")
-
-                # Remove nav noise
-                for tag in soup.select("nav, header, footer, .nav, .sidebar"):
-                    tag.decompose()
-
-                listings = self._find_links_broad(soup)
-                print(f"    [OpenGov] Found {len(listings)} links on vendor page")
-
-                for item in listings:
-                    try:
-                        title = item["title"]
-                        href = item["href"]
-                        extra = item.get("extra_text", "")
-                        combined = f"{title} {extra}"
-
-                        if len(title) < 10:
-                            continue
-                        if any(p in title.lower() for p in CountyScraper._SKIP_PATTERNS):
-                            continue
-
-                        is_bid = any(ind in combined.lower() for ind in CountyScraper._BID_INDICATORS)
-                        is_construction = self._is_construction_related(combined)
-                        if not is_bid and not is_construction:
-                            continue
-
-                        detail_url = self._make_detail_url(self.BASE, href)
-                        ptype, kw_matches = self._match_keywords(combined)
-                        loc = self._match_location(combined)
-
-                        bid = BidOpportunity(
-                            title=title,
-                            source="opengov",
-                            source_url=detail_url,
-                            source_id=self._generate_source_id("opengov", title, href),
-                            project_type=ptype,
-                            location_city=loc.get("city", ""),
-                            location_county=loc.get("county", ""),
-                            location_state=loc.get("state", "VA"),
-                            keyword_matches=kw_matches,
-                            scraped_at=datetime.now().isoformat(),
-                        )
+            if soup:
+                rows = soup.find_all("tr")
+                for row in rows[1:50]:  # Skip header
+                    bid = self._parse_row(row)
+                    if bid:
                         results.append(bid)
-                    except Exception as e:
-                        print(f"    [OpenGov] Error parsing listing: {e}")
 
-                if results:
-                    print(f"    [OpenGov] Got {len(results)} from browser")
-                    self.results = results
-                    return results
-            except Exception as e:
-                print(f"    [OpenGov] Browser login failed: {e}")
+        except Exception as e:
+            logger.error(f"eMMA Maryland error: {e}")
+            raise
 
-        # Strategy 2: requests-based login (fallback)
-        logged_in = self._login()
-        if logged_in:
-            vendor_results = self._scrape_vendor_page()
-            results.extend(vendor_results)
-
-        # Strategy 3: Embed portals for known agencies
-        for org_slug, state, agency in self.EMBED_PORTALS:
-            embed_results = self._scrape_embed_portal(org_slug, state, agency)
-            results.extend(embed_results)
-
-        if not results:
-            print("    [OpenGov] No results found.")
-            if not HAS_BROWSER:
-                print("    [OpenGov] Install Playwright for browser-based scraping.")
-            print(f"    [OpenGov] Browse manually: {vendor_url}")
-
-        print(f"    [OpenGov] Total results: {len(results)}")
-        self.results = results
         return results
 
+    def _parse_row(self, row) -> Optional[BidOpportunity]:
+        cells = row.find_all("td")
+        if len(cells) < 3:
+            return None
 
-# ============================================================
-# SCRAPER FACTORY
-# ============================================================
+        title = self._clean_text(cells[0].text) if cells else ""
+        link = cells[0].find("a")
+        url = urljoin(self.BASE_URL, link["href"]) if link else ""
 
-def get_scraper(source_key: str, source_config: dict) -> BaseScraper:
-    """Return the appropriate scraper for a given source."""
-    scraper_map = {
-        # API-based scrapers (JSON, most reliable)
-        "sam_gov": SAMGovScraper,
-        "dc_ocp": DCOCPScraper,
-        "montgomery_county": MontgomeryCountyScraper,
-        # State portals
-        "eva": EVAScraper,
-        # Authenticated scrapers
-        "bidnet_direct": BidNetScraper,
-        "opengov": OpenGovScraper,
-        # Permit scrapers
-        "arlington_permits": PermitScraper,
-        "fairfax_permits": PermitScraper,
-    }
+        if not self._is_construction_related(title):
+            return None
 
-    scraper_class = scraper_map.get(source_key)
-    if scraper_class is None:
-        # All other sources use the generic HTML scraper
-        return CountyScraper(source_key, source_config)
+        return BidOpportunity(
+            title=title,
+            source="eMMA Maryland",
+            source_url=url,
+            location_state="MD",
+            agency="State of Maryland",
+            keyword_matches=self._extract_keywords(title),
+        )
 
-    return scraper_class(source_key, source_config)
+
+# ─── PlanHub (NEW) ──────────────────────────────────────────────────
+class PlanHubScraper(BaseScraper):
+    """
+    PlanHub commercial plan room scraper.
+    Free for GCs — covers commercial/private projects
+    that government portals miss.
+    """
+
+    BASE_URL = "https://www.planhub.com"
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+        try:
+            # PlanHub has a public project search
+            search_url = f"{self.BASE_URL}/projects"
+
+            # PlanHub is heavily JS-rendered, need browser
+            soup = self._browser_fetch(search_url, wait_for=".project-card")
+
+            if not soup:
+                # Fallback: try the API endpoint
+                soup = self._fetch_html(search_url)
+
+            if soup:
+                # Look for project cards/listings
+                cards = soup.find_all(class_=re.compile(r"project|listing|bid|card"))
+                if not cards:
+                    cards = soup.find_all("article")
+                if not cards:
+                    # Try table rows
+                    cards = soup.find_all("tr")[1:50]
+
+                for card in cards[:100]:
+                    bid = self._parse_card(card)
+                    if bid:
+                        results.append(bid)
+
+        except Exception as e:
+            logger.warning(f"PlanHub scraper: {e}")
+            # PlanHub may block — not a critical failure
+            return results
+
+        return results
+
+    def _parse_card(self, card) -> Optional[BidOpportunity]:
+        # Extract title
+        title_el = card.find(["h2", "h3", "h4", "a", "strong"])
+        if not title_el:
+            return None
+        title = self._clean_text(title_el.text)
+        if not title or len(title) < 5:
+            return None
+
+        # Link
+        link = card.find("a", href=True)
+        url = urljoin(self.BASE_URL, link["href"]) if link else ""
+
+        # Description
+        desc_el = card.find(class_=re.compile(r"desc|detail|summary|body"))
+        desc = self._clean_text(desc_el.text) if desc_el else ""
+
+        # Location
+        loc_el = card.find(class_=re.compile(r"location|address|city"))
+        loc_text = self._clean_text(loc_el.text) if loc_el else ""
+        location = self._extract_location(loc_text or title)
+
+        # Check relevance
+        combined = f"{title} {desc}"
+        if not self._extract_keywords(combined):
+            return None
+
+        # Due date
+        date_el = card.find(class_=re.compile(r"date|deadline|due|close"))
+        due_date = self._clean_text(date_el.text) if date_el else ""
+
+        # Value
+        value_el = card.find(class_=re.compile(r"value|budget|cost|amount"))
+        value_text = self._clean_text(value_el.text) if value_el else ""
+        value = self._parse_money(value_text)
+
+        return BidOpportunity(
+            title=title,
+            source="PlanHub",
+            source_url=url,
+            description=desc[:2000],
+            project_type="commercial_private",
+            location_city=location.get("city", ""),
+            location_county=location.get("county", ""),
+            location_state=location.get("state", ""),
+            location_zip=location.get("zip", ""),
+            estimated_value_min=value,
+            estimated_value_max=value,
+            budget_display=value_text,
+            due_date=due_date,
+            keyword_matches=self._extract_keywords(combined),
+        )
+
+
+# ─── County/Generic HTML scraper ────────────────────────────────────
+class CountyScraper(BaseScraper):
+    """Generic county/city procurement portal scraper."""
+
+    def __init__(self, source_key: str):
+        super().__init__()
+        self.source_key = source_key
+        self.config = SOURCES.get(source_key, {})
+        self.base_url = self.config.get("url", "")
+        self.source_name = self.config.get("name", source_key)
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+        try:
+            soup = self._fetch_html(self.base_url)
+
+            # Strategy 1: Look for tables
+            tables = soup.find_all("table")
+            for table in tables:
+                rows = table.find_all("tr")
+                for row in rows[1:]:
+                    bid = self._parse_table_row(row)
+                    if bid:
+                        results.append(bid)
+
+            # Strategy 2: Look for listing divs/articles
+            if not results:
+                listings = soup.find_all(
+                    class_=re.compile(r"bid|solicitation|procurement|listing|opportunity")
+                )
+                for listing in listings:
+                    bid = self._parse_listing_div(listing)
+                    if bid:
+                        results.append(bid)
+
+            # Strategy 3: Look for links with bid-related text
+            if not results:
+                links = soup.find_all("a", href=True)
+                for link in links:
+                    text = self._clean_text(link.text)
+                    if self._is_construction_related(text):
+                        results.append(BidOpportunity(
+                            title=text,
+                            source=self.source_name,
+                            source_url=urljoin(self.base_url, link["href"]),
+                            location_state=self._guess_state(),
+                            agency=self.source_name,
+                            keyword_matches=self._extract_keywords(text),
+                        ))
+
+            # Strategy 4: Browser fallback for JS-rendered sites
+            if not results:
+                soup = self._browser_fetch(self.base_url, wait_for="table")
+                if soup:
+                    tables = soup.find_all("table")
+                    for table in tables:
+                        rows = table.find_all("tr")
+                        for row in rows[1:]:
+                            bid = self._parse_table_row(row)
+                            if bid:
+                                results.append(bid)
+
+        except Exception as e:
+            logger.error(f"{self.source_name} error: {e}")
+            raise
+
+        return results
+
+    def _parse_table_row(self, row) -> Optional[BidOpportunity]:
+        cells = row.find_all(["td", "th"])
+        if len(cells) < 2:
+            return None
+
+        title = self._clean_text(cells[0].text)
+        if not title or len(title) < 5:
+            return None
+
+        # Find link
+        link = row.find("a", href=True)
+        url = urljoin(self.base_url, link["href"]) if link else ""
+
+        # Try to extract date from last cell
+        due_date = ""
+        for cell in reversed(cells):
+            text = self._clean_text(cell.text)
+            if re.search(r'\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2}', text):
+                due_date = text
+                break
+
+        if not self._is_construction_related(title):
+            if not self._extract_keywords(title):
+                return None
+
+        return BidOpportunity(
+            title=title,
+            source=self.source_name,
+            source_url=url,
+            location_state=self._guess_state(),
+            due_date=due_date,
+            agency=self.source_name,
+            keyword_matches=self._extract_keywords(title),
+        )
+
+    def _parse_listing_div(self, div) -> Optional[BidOpportunity]:
+        title_el = div.find(["h2", "h3", "h4", "a", "strong"])
+        if not title_el:
+            return None
+        title = self._clean_text(title_el.text)
+        if not title:
+            return None
+
+        link = div.find("a", href=True)
+        url = urljoin(self.base_url, link["href"]) if link else ""
+
+        if not self._is_construction_related(title):
+            if not self._extract_keywords(title):
+                return None
+
+        return BidOpportunity(
+            title=title,
+            source=self.source_name,
+            source_url=url,
+            location_state=self._guess_state(),
+            agency=self.source_name,
+            keyword_matches=self._extract_keywords(title),
+        )
+
+    def _guess_state(self) -> str:
+        name = self.source_name.lower()
+        if any(md in name for md in ["maryland", "montgomery", "prince george", "howard", "anne arundel"]):
+            return "MD"
+        if "dc" in name or "district" in name:
+            return "DC"
+        return "VA"
+
+
+# ─── BidNet Direct ──────────────────────────────────────────────────
+class BidNetScraper(BaseScraper):
+    """BidNet Direct — requires login credentials."""
+
+    BASE_URL = "https://www.bidnetdirect.com"
+
+    def scrape(self) -> List[BidOpportunity]:
+        email = os.environ.get("BIDNET_EMAIL", "")
+        password = os.environ.get("BIDNET_PASSWORD", "")
+
+        if not email or not password:
+            logger.info("BidNet credentials not set, skipping")
+            return []
+
+        results = []
+        try:
+            # Login
+            login_url = f"{self.BASE_URL}/login"
+            self.session.post(login_url, data={
+                "email": email,
+                "password": password,
+            }, timeout=REQUEST_TIMEOUT)
+
+            # Search for construction bids in our area
+            search_url = f"{self.BASE_URL}/bids"
+            soup = self._fetch_html(search_url)
+
+            rows = soup.find_all("tr")
+            for row in rows[1:]:
+                bid = self._parse_row(row)
+                if bid:
+                    results.append(bid)
+
+        except Exception as e:
+            logger.error(f"BidNet error: {e}")
+            raise
+
+        return results
+
+    def _parse_row(self, row) -> Optional[BidOpportunity]:
+        cells = row.find_all("td")
+        if len(cells) < 3:
+            return None
+
+        title = self._clean_text(cells[0].text)
+        link = cells[0].find("a", href=True)
+        url = urljoin(self.BASE_URL, link["href"]) if link else ""
+
+        if not self._is_construction_related(title):
+            if not self._extract_keywords(title):
+                return None
+
+        agency = self._clean_text(cells[1].text) if len(cells) > 1 else ""
+        due_date = self._clean_text(cells[-1].text)
+
+        location = self._extract_location(f"{title} {agency}")
+
+        return BidOpportunity(
+            title=title,
+            source="BidNet Direct",
+            source_url=url,
+            location_city=location.get("city", ""),
+            location_state=location.get("state", ""),
+            due_date=due_date,
+            agency=agency,
+            keyword_matches=self._extract_keywords(title),
+        )
+
+
+# ─── OpenGov Procurement ────────────────────────────────────────────
+class OpenGovScraper(BaseScraper):
+    """OpenGov Procurement Portal."""
+
+    BASE_URL = "https://procurement.opengov.com"
+
+    def scrape(self) -> List[BidOpportunity]:
+        email = os.environ.get("OPENGOV_EMAIL", "")
+        password = os.environ.get("OPENGOV_PASSWORD", "")
+
+        results = []
+        try:
+            # Known OpenGov embed portals for our agencies
+            embed_urls = [
+                "https://procurement.opengov.com/portal/arlington-county",
+                "https://procurement.opengov.com/portal/fairfax-county",
+                "https://procurement.opengov.com/portal/loudoun-county-va",
+            ]
+
+            for portal_url in embed_urls:
+                try:
+                    soup = self._fetch_html(portal_url)
+                    if not soup.find("table"):
+                        soup = self._browser_fetch(portal_url, wait_for="table")
+
+                    if soup:
+                        rows = soup.find_all("tr")
+                        for row in rows[1:]:
+                            bid = self._parse_row(row, portal_url)
+                            if bid:
+                                results.append(bid)
+                except Exception as e:
+                    logger.warning(f"OpenGov portal error ({portal_url}): {e}")
+                    continue
+
+                time.sleep(1)
+
+        except Exception as e:
+            logger.error(f"OpenGov error: {e}")
+            raise
+
+        return results
+
+    def _parse_row(self, row, base_url: str) -> Optional[BidOpportunity]:
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            return None
+
+        title = self._clean_text(cells[0].text)
+        link = cells[0].find("a", href=True)
+        url = urljoin(base_url, link["href"]) if link else ""
+
+        if not self._is_construction_related(title):
+            if not self._extract_keywords(title):
+                return None
+
+        # Determine agency from portal URL
+        agency = ""
+        if "arlington" in base_url:
+            agency = "Arlington County"
+        elif "fairfax" in base_url:
+            agency = "Fairfax County"
+        elif "loudoun" in base_url:
+            agency = "Loudoun County"
+
+        return BidOpportunity(
+            title=title,
+            source="OpenGov",
+            source_url=url,
+            location_state="VA",
+            agency=agency,
+            keyword_matches=self._extract_keywords(title),
+        )
+
+
+# ─── Permit Scraper (Lead Gen) ──────────────────────────────────────
+class PermitScraper(BaseScraper):
+    """Building permit data for proactive lead generation."""
+
+    def __init__(self, source_key: str):
+        super().__init__()
+        self.source_key = source_key
+        self.config = SOURCES.get(source_key, {})
+        self.base_url = self.config.get("url", "")
+        self.source_name = self.config.get("name", source_key)
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+        try:
+            soup = self._fetch_html(self.base_url)
+
+            # Look for permit tables/listings
+            tables = soup.find_all("table")
+            for table in tables:
+                rows = table.find_all("tr")
+                for row in rows[1:30]:  # Limit to recent permits
+                    bid = self._parse_permit(row)
+                    if bid:
+                        results.append(bid)
+
+            if not results:
+                soup = self._browser_fetch(self.base_url, wait_for="table")
+                if soup:
+                    for table in soup.find_all("table"):
+                        for row in table.find_all("tr")[1:30]:
+                            bid = self._parse_permit(row)
+                            if bid:
+                                results.append(bid)
+
+        except Exception as e:
+            logger.warning(f"{self.source_name} permit scraper: {e}")
+
+        return results
+
+    def _parse_permit(self, row) -> Optional[BidOpportunity]:
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            return None
+
+        text = " ".join(self._clean_text(c.text) for c in cells)
+        if not self._is_construction_related(text):
+            return None
+
+        title = self._clean_text(cells[0].text)
+        value = self._parse_money(text)
+
+        # Only surface permits with significant value
+        if value and value < 25_000:
+            return None
+
+        return BidOpportunity(
+            title=f"[Permit] {title}",
+            source=self.source_name,
+            source_url=self.base_url,
+            description=text[:500],
+            project_type="commercial_private",
+            estimated_value_min=value,
+            estimated_value_max=value,
+            keyword_matches=self._extract_keywords(text),
+        )

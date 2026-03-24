@@ -1,146 +1,173 @@
 """
-OAK BUILDERS LLC - Bid Finder
+OAK BUILDERS LLC - Bid Finder v2
 Google Sheets Integration
 
-Appends new bid opportunities to a Google Sheet organized by category.
-Uses gspread with a Google Cloud service account for authentication.
-
-Setup:
-  1. Create a project at console.cloud.google.com
-  2. Enable Google Sheets API and Google Drive API
-  3. Create a Service Account and download the JSON key as service_account.json
-  4. Share your Google Sheet with the service account email address
+Changes from v1:
+- Added win_probability column
+- Added pipeline_stage column
+- Added bonding_required indicator
+- Added scope_category for quick filtering
+- Better date formatting
+- Sheet auto-sorts by relevance score
 """
 
-import os
 import json
+import logging
+import os
 from datetime import datetime
+from typing import List
 
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-except ImportError:
-    gspread = None
-
-from config import GOOGLE_SHEETS, NOTIFICATIONS
+from config import SHEETS, DATABASE_FILE
 from models import BidDatabase
 
+logger = logging.getLogger("sheets")
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
-SHEET_HEADERS = [
-    "Date Added", "Score", "Project Type", "Title", "Source",
-    "Location", "Est. Value", "Due Date", "Agency/Contact",
-    "Set-Aside", "Status", "URL",
+# Headers for the sheet
+HEADERS = [
+    "Date Found", "Score", "Win %", "Pipeline",
+    "Project Type", "Scope Fit", "Title",
+    "Location", "Value Range", "Bonding?",
+    "Due Date", "Days Left", "Agency",
+    "Set-Aside", "Source", "Contact", "URL",
 ]
 
 
 class SheetsUpdater:
-    """Appends new bid opportunities to a Google Sheet."""
+    """Export bid opportunities to Google Sheets."""
 
-    def __init__(self, db: BidDatabase):
-        self.db = db
-        self.config = GOOGLE_SHEETS
+    def __init__(self):
+        self.db = BidDatabase(DATABASE_FILE)
+        self.sheet = None
+        self._connect()
 
-        if gspread is None:
-            raise ImportError("Install Google Sheets deps: pip install gspread google-auth")
-
-        # Support both env-var (GitHub Actions) and file-based (local) credentials
-        sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-        if sa_json:
-            info = json.loads(sa_json)
-            creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-        else:
-            sa_file = self.config.get("service_account_file", "service_account.json")
-            creds = Credentials.from_service_account_file(sa_file, scopes=SCOPES)
-
-        self.client = gspread.authorize(creds)
-
-    def append_new_bids(self) -> int:
-        """Append new bids since last email to the Google Sheet. Returns count appended."""
-        min_score = NOTIFICATIONS.get("min_score_to_notify", 0)
-        opportunities = self.db.get_new_since_last_email(min_score=min_score)
-
-        if not opportunities:
-            print("[Sheets] No new opportunities to append.")
-            return 0
-
-        # Filter out already-exported opportunities
-        exported_keys = self.db.get_exported_keys()
-        opportunities = [
-            opp for opp in opportunities
-            if (opp.source, opp.source_id) not in exported_keys
-        ]
-        if not opportunities:
-            print("[Sheets] All opportunities already exported. Skipping.")
-            return 0
-
-        spreadsheet_name = os.environ.get(
-            "GOOGLE_SHEET_NAME",
-            self.config.get("spreadsheet_name", "OAK Builders - Bid Tracker"),
-        )
-
+    def _connect(self):
+        """Authenticate and open spreadsheet."""
         try:
-            spreadsheet = self.client.open(spreadsheet_name)
-        except gspread.SpreadsheetNotFound:
-            print(f"[Sheets] Spreadsheet '{spreadsheet_name}' not found. Creating...")
-            spreadsheet = self.client.create(spreadsheet_name)
+            import gspread
+            from google.oauth2.service_account import Credentials
 
-        worksheet_name = self.config.get("worksheet_name", "Bids")
-        try:
-            worksheet = spreadsheet.worksheet(worksheet_name)
-        except gspread.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(
-                title=worksheet_name, rows=1000, cols=len(SHEET_HEADERS),
-            )
-            worksheet.append_row(SHEET_HEADERS)
+            scopes = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ]
 
-        # Ensure headers exist
-        existing = worksheet.get_all_values()
-        if not existing or existing[0] != SHEET_HEADERS:
-            worksheet.insert_row(SHEET_HEADERS, index=1)
-
-        # Build rows sorted by project type then score descending
-        sorted_opps = sorted(
-            opportunities, key=lambda o: (o.project_type or "zzz", -o.relevance_score)
-        )
-        rows = []
-        for opp in sorted_opps:
-            location = ", ".join(filter(None, [
-                opp.location_city, opp.location_county, opp.location_state,
-            ]))
-            if opp.budget_display:
-                value = opp.budget_display
-            elif opp.estimated_value_min:
-                value = f"${opp.estimated_value_min:,.0f}-${opp.estimated_value_max:,.0f}"
+            # Try env var first (GitHub Actions), then file
+            creds_json = SHEETS.get("credentials_json", "")
+            if creds_json:
+                info = json.loads(creds_json)
+                creds = Credentials.from_service_account_info(info, scopes=scopes)
             else:
-                value = ""
+                creds_file = SHEETS.get("credentials_file", "credentials.json")
+                creds = Credentials.from_service_account_file(creds_file, scopes=scopes)
 
-            contact = f"{opp.agency_name} / {opp.contact_name}".strip(" /")
+            client = gspread.authorize(creds)
 
-            rows.append([
-                datetime.now().strftime("%Y-%m-%d"),
-                opp.relevance_score,
-                opp.project_type or "other",
-                opp.title[:100],
-                opp.source,
+            # Open or create spreadsheet
+            sheet_name = SHEETS["spreadsheet_name"]
+            try:
+                self.sheet = client.open(sheet_name)
+            except gspread.SpreadsheetNotFound:
+                self.sheet = client.create(sheet_name)
+                logger.info(f"Created new spreadsheet: {sheet_name}")
+
+        except Exception as e:
+            logger.error(f"Google Sheets connection failed: {e}")
+            raise
+
+    def update(self):
+        """Append new opportunities to the sheet."""
+        if not self.sheet:
+            return
+
+        min_score = SHEETS.get("min_score", 20)
+        bids = self.db.search(min_score=min_score, show_expired=False, limit=500)
+
+        if not bids:
+            logger.info("No opportunities to export to Sheets")
+            return
+
+        # Filter already-exported
+        exported = self.db.get_exported_keys()
+        new_bids = [
+            b for b in bids
+            if f"{b.get('source', '')}:{b.get('source_id', '')}" not in exported
+        ]
+
+        if not new_bids:
+            logger.info("All opportunities already exported to Sheets")
+            return
+
+        # Sort by project type then score
+        new_bids.sort(
+            key=lambda b: (b.get("project_type", ""), -b.get("relevance_score", 0))
+        )
+
+        # Ensure worksheet exists with headers
+        today = datetime.now().strftime("%b %Y")
+        try:
+            ws = self.sheet.worksheet(today)
+        except Exception:
+            ws = self.sheet.add_worksheet(title=today, rows=500, cols=len(HEADERS))
+            ws.append_row(HEADERS)
+            # Bold the header row
+            ws.format("1:1", {"textFormat": {"bold": True}})
+
+        # Build rows
+        rows = []
+        export_keys = []
+        for bid in new_bids:
+            # Calculate days left
+            days_left = ""
+            due = bid.get("due_date", "")
+            if due:
+                for fmt in ["%Y-%m-%d", "%m/%d/%Y"]:
+                    try:
+                        dt = datetime.strptime(due[:10], fmt)
+                        days_left = str((dt - datetime.now()).days)
+                        break
+                    except ValueError:
+                        continue
+
+            # Value range display
+            val_min = bid.get("estimated_value_min")
+            val_max = bid.get("estimated_value_max")
+            if val_min and val_max and val_min != val_max:
+                value_display = f"${val_min:,.0f} - ${val_max:,.0f}"
+            elif val_min:
+                value_display = f"${val_min:,.0f}"
+            elif val_max:
+                value_display = f"${val_max:,.0f}"
+            else:
+                value_display = ""
+
+            # Location
+            loc_parts = [bid.get("location_city", ""), bid.get("location_state", "")]
+            location = ", ".join(p for p in loc_parts if p)
+
+            row = [
+                bid.get("first_seen_date", datetime.now().strftime("%Y-%m-%d")),
+                bid.get("relevance_score", 0),
+                bid.get("win_probability", 0),
+                bid.get("pipeline_stage", "discovered"),
+                bid.get("project_type", ""),
+                bid.get("scope_category", ""),
+                bid.get("title", ""),
                 location,
-                value,
-                opp.due_date or "",
-                contact,
-                opp.set_aside or "",
-                opp.status or "new",
-                opp.source_url or "",
-            ])
+                value_display,
+                "Yes" if bid.get("bonding_required") else "",
+                bid.get("due_date", ""),
+                days_left,
+                bid.get("agency", ""),
+                bid.get("set_aside", ""),
+                bid.get("source", ""),
+                bid.get("contact_email", "") or bid.get("contact_name", ""),
+                bid.get("source_url", ""),
+            ]
+            rows.append(row)
+            export_keys.append(f"{bid.get('source', '')}:{bid.get('source_id', '')}")
 
-        worksheet.append_rows(rows, value_input_option="USER_ENTERED")
-
-        # Mark these as exported so they won't be re-appended next run
-        export_keys = [(opp.source, opp.source_id) for opp in sorted_opps]
-        self.db.mark_exported(export_keys)
-
-        print(f"[Sheets] Appended {len(rows)} bids to '{spreadsheet_name}'.")
-        return len(rows)
+        # Batch append
+        if rows:
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+            self.db.mark_exported(export_keys)
+            logger.info(f"Exported {len(rows)} opportunities to Google Sheets '{today}' tab")

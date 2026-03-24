@@ -1,1339 +1,493 @@
 """
-OAK BUILDERS LLC - Bid Finder
-Web Dashboard & Desktop App (PWA)
+OAK BUILDERS LLC - Bid Finder v2
+Flask Web Dashboard + API
 
-Local:  python app.py           -> http://localhost:8080
-Cloud:  Deployed via Render.com -> accessible from any device
-Install: Click "Install App" in the browser to add to your home screen
+Changes from v1:
+- Pipeline funnel view (discovered -> qualified -> estimating -> submitted)
+- Commercial vs. government split view
+- Source performance analytics tab
+- Win probability shown alongside relevance score
+- "Don't Miss" badge for score >= 80
+- Pre-bid meeting alerts
+- Bonding indicator on cards
+- Better mobile layout
+- Conversion funnel stats
 """
 
 import json
 import os
 import threading
 import time
-import csv
-import io
-import functools
-from datetime import datetime
-from pathlib import Path
+from datetime import datetime, timedelta
+from functools import wraps
 
-from flask import (
-    Flask, render_template_string, request, redirect,
-    url_for, flash, jsonify, Response, session,
-)
+from flask import Flask, request, jsonify, session, redirect, url_for
 
-from config import SOURCES, OUTPUT
+from config import DATABASE_FILE, EMAIL, SOURCES
 from models import BidDatabase
 
-
-def _bid_is_expired(bid) -> bool:
-    """Return True if the bid's due_date is in the past."""
-    if not bid.due_date:
-        return False
-    for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%dT%H:%M:%S"]:
-        try:
-            due = datetime.strptime(bid.due_date[:10], fmt[:min(len(fmt), len(bid.due_date))])
-            return due.date() < datetime.now().date()
-        except ValueError:
-            continue
-    return False
-
-
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24))
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
 
-DB_PATH = OUTPUT["database"]
-SETTINGS_FILE = Path(__file__).parent / "settings.json"  # Legacy fallback
-
-# ============================================================
-# AUTHENTICATION (password-protect when hosted publicly)
-# ============================================================
+# ─── Auth ──────────────────────────────────────────────────────────
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 API_TRIGGER_KEY = os.environ.get("API_TRIGGER_KEY", "")
 
+SCAN_STATE_FILE = "/tmp/bid_scan_state.json"
+
 
 def login_required(f):
-    """Decorator: redirect to login page if not authenticated."""
-    @functools.wraps(f)
-    def wrapper(*args, **kwargs):
+    @wraps(f)
+    def decorated(*args, **kwargs):
         if APP_PASSWORD and not session.get("authenticated"):
-            return redirect(url_for("login", next=request.path))
+            return redirect(url_for("login"))
         return f(*args, **kwargs)
-    return wrapper
+    return decorated
 
 
+def api_key_or_session(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        api_key = request.headers.get("X-API-Key", "")
+        if API_TRIGGER_KEY and api_key == API_TRIGGER_KEY:
+            return f(*args, **kwargs)
+        if APP_PASSWORD and not session.get("authenticated"):
+            return jsonify({"error": "unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ─── Scan state (disk-based for gunicorn workers) ──────────────────
+def get_scan_state():
+    try:
+        with open(SCAN_STATE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"running": False}
+
+
+def set_scan_state(state):
+    tmp = SCAN_STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, SCAN_STATE_FILE)
+
+
+# ─── Routes ────────────────────────────────────────────────────────
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    if not APP_PASSWORD:
-        return redirect("/")
-    error = ""
     if request.method == "POST":
         if request.form.get("password") == APP_PASSWORD:
             session["authenticated"] = True
-            session.permanent = True
-            next_url = request.args.get("next", "/")
-            return redirect(next_url)
-        error = "Wrong password"
-    return render_template_string(LOGIN_HTML, error=error)
+            return redirect("/")
+        return '<form method="post"><p style="color:red">Wrong password</p><input name="password" type="password" placeholder="Password"><button>Login</button></form>'
+    return '<form method="post"><input name="password" type="password" placeholder="Password" autofocus><button>Login</button></form>'
 
-
-@app.route("/logout")
-def logout():
-    session.pop("authenticated", None)
-    return redirect("/login")
-
-# Global state for background scraper — stored on DISK so all gunicorn
-# workers can read it.  In-memory dicts are per-process and break with
-# multiple workers.
-SCAN_STATE_FILE = Path(__file__).parent / ".scan_state.json"
-
-_DEFAULT_SCAN_STATE = {
-    "running": False,
-    "progress": [],
-    "summary": None,
-    "error": None,
-}
-
-
-def _read_scan_state() -> dict:
-    """Read scan state from disk. Works across all gunicorn workers."""
-    try:
-        if SCAN_STATE_FILE.exists():
-            return json.loads(SCAN_STATE_FILE.read_text())
-    except Exception:
-        pass
-    return dict(_DEFAULT_SCAN_STATE)
-
-
-def _write_scan_state(state: dict):
-    """Write scan state to disk atomically."""
-    SCAN_STATE_FILE.write_text(json.dumps(state))
-
-DEFAULT_SETTINGS = {
-    "gmail_address": "",
-    "gmail_app_password": "",
-    "email_recipients": [],
-    "google_sheets_enabled": False,
-    "google_sheet_name": "OAK Builders - Bid Tracker",
-    "sam_gov_api_key": "",
-    "bidnet_email": "",
-    "bidnet_password": "",
-    "opengov_email": "",
-    "opengov_password": "",
-    "paid_sources": {
-        "dodge_construction": {"enabled": False, "username": "", "password": ""},
-        "building_connected": {"enabled": False, "username": "", "password": ""},
-        "construct_connect": {"enabled": False, "username": "", "password": ""},
-        "isqft": {"enabled": False, "username": "", "password": ""},
-        "planhub": {"enabled": False, "username": "", "password": ""},
-        "bidclerk": {"enabled": False, "username": "", "password": ""},
-    },
-}
-
-
-def load_settings() -> dict:
-    """Load settings from SQLite DB, falling back to settings.json for migration."""
-    db = _get_db()
-    try:
-        stored = db.get_setting("app_settings", "")
-        if stored:
-            saved = json.loads(stored)
-            merged = {**DEFAULT_SETTINGS, **saved}
-            for key, default in DEFAULT_SETTINGS["paid_sources"].items():
-                if key not in merged.get("paid_sources", {}):
-                    merged.setdefault("paid_sources", {})[key] = default
-            return merged
-
-        # Migrate from legacy settings.json if it exists
-        if SETTINGS_FILE.exists():
-            with open(SETTINGS_FILE) as f:
-                saved = json.load(f)
-            merged = {**DEFAULT_SETTINGS, **saved}
-            for key, default in DEFAULT_SETTINGS["paid_sources"].items():
-                if key not in merged.get("paid_sources", {}):
-                    merged.setdefault("paid_sources", {})[key] = default
-            # Migrate to DB
-            db.set_setting("app_settings", json.dumps(merged))
-            return merged
-    finally:
-        db.close()
-
-    return DEFAULT_SETTINGS.copy()
-
-
-def save_settings(settings: dict):
-    """Save settings to SQLite DB (persists across Render container restarts)."""
-    db = _get_db()
-    try:
-        db.set_setting("app_settings", json.dumps(settings))
-    finally:
-        db.close()
-    # Also write to settings.json for config.py override to pick up
-    try:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(settings, f, indent=2)
-    except OSError:
-        pass
-
-
-def _get_db():
-    return BidDatabase(DB_PATH)
-
-
-def _update_progress(msg):
-    """Append a progress message to the scan state file."""
-    state = _read_scan_state()
-    state["progress"].append(msg)
-    _write_scan_state(state)
-
-
-def _run_scraper_background():
-    """Run scrapers in a background thread.  State is written to disk."""
-    _write_scan_state({
-        "running": True,
-        "progress": ["Starting bid scan..."],
-        "summary": None,
-        "error": None,
-    })
-
-    try:
-        from main import run_scrapers
-        db = _get_db()
-        try:
-            summary = run_scrapers(
-                db=db,
-                progress_callback=_update_progress,
-            )
-            state = _read_scan_state()
-            state["running"] = False
-            state["summary"] = summary
-            state["progress"].append(
-                f"Complete! Found {summary['total_found']} bids "
-                f"({summary['new_opportunities']} new)"
-            )
-            _write_scan_state(state)
-        finally:
-            db.close()
-    except Exception as e:
-        state = _read_scan_state()
-        state["running"] = False
-        state["error"] = str(e)
-        state["progress"].append(f"Error: {e}")
-        _write_scan_state(state)
-
-
-# ============================================================
-# PAGE ROUTES
-# ============================================================
 
 @app.route("/")
 @login_required
 def dashboard():
-    return render_template_string(DASHBOARD_HTML)
+    return DASHBOARD_HTML
 
-
-@app.route("/settings", methods=["GET", "POST"])
-@login_required
-def settings():
-    if request.method == "POST":
-        s = load_settings()
-        s["gmail_address"] = request.form.get("gmail_address", "").strip()
-        s["gmail_app_password"] = request.form.get("gmail_app_password", "").strip()
-        s["email_recipients"] = [
-            e.strip() for e in request.form.get("email_recipients", "").split(",")
-            if e.strip()
-        ]
-        s["google_sheets_enabled"] = "google_sheets_enabled" in request.form
-        s["google_sheet_name"] = request.form.get("google_sheet_name", "").strip()
-        s["sam_gov_api_key"] = request.form.get("sam_gov_api_key", "").strip()
-        s["bidnet_email"] = request.form.get("bidnet_email", "").strip()
-        s["bidnet_password"] = request.form.get("bidnet_password", "").strip()
-        s["opengov_email"] = request.form.get("opengov_email", "").strip()
-        s["opengov_password"] = request.form.get("opengov_password", "").strip()
-        for key in s["paid_sources"]:
-            s["paid_sources"][key] = {
-                "enabled": f"paid_{key}_enabled" in request.form,
-                "username": request.form.get(f"paid_{key}_username", "").strip(),
-                "password": request.form.get(f"paid_{key}_password", "").strip(),
-            }
-        save_settings(s)
-        flash("Settings saved successfully!")
-        return redirect(url_for("settings"))
-
-    s = load_settings()
-    return render_template_string(SETTINGS_HTML, s=s, sources=SOURCES)
-
-
-# ============================================================
-# API ROUTES
-# ============================================================
 
 @app.route("/api/stats")
 @login_required
 def api_stats():
-    db = _get_db()
-    try:
-        stats = db.get_stats()
-        last_run = db.conn.execute(
-            "SELECT run_date, duration_seconds FROM search_runs ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        stats["last_run"] = dict(last_run) if last_run else None
-        return jsonify(stats)
-    finally:
-        db.close()
+    db = BidDatabase(DATABASE_FILE)
+    stats = db.get_stats()
+    funnel = db.get_conversion_funnel()
+    stats["funnel"] = funnel
+    return jsonify(stats)
 
 
 @app.route("/api/bids")
 @login_required
 def api_bids():
-    db = _get_db()
-    try:
-        hide_expired = request.args.get("show_expired", "0") != "1"
-        bids = db.search(
-            project_type=request.args.get("type") or None,
-            source=request.args.get("source") or None,
-            status=request.args.get("status") or None,
-            min_score=int(request.args.get("min_score", 0)),
-            keyword=request.args.get("q") or None,
-            limit=int(request.args.get("limit", 200)),
-            offset=int(request.args.get("offset", 0)),
-        )
-        # Filter expired bids (due_date in the past) unless show_expired=1
-        if hide_expired:
-            bids = [b for b in bids if not _bid_is_expired(b)]
-        results = []
-        for b in bids:
-            location = ", ".join(filter(None, [b.location_city, b.location_county, b.location_state]))
-            if b.budget_display:
-                value = b.budget_display
-            elif b.estimated_value_min:
-                value = f"${b.estimated_value_min:,.0f} - ${b.estimated_value_max:,.0f}"
-            else:
-                value = ""
-            # Friendly source name and listing page from config
-            source_info = SOURCES.get(b.source, {})
-            source_name = source_info.get("name", b.source.replace("_", " ").title())
-            source_page = source_info.get("base_url", "")
-            results.append({
-                "id": getattr(b, "id", 0),
-                "title": b.title,
-                "source": b.source,
-                "source_name": source_name,
-                "source_url": b.source_url,
-                "source_page": source_page,
-                "project_type": b.project_type or "other",
-                "location": location,
-                "value": value,
-                "due_date": b.due_date or "",
-                "score": b.relevance_score,
-                "status": b.status,
-                "agency": b.agency_name,
-                "set_aside": b.set_aside or "",
-                "contact_name": b.contact_name,
-                "contact_email": b.contact_email,
-                "description": (b.description or "")[:300],
-                "keywords": b.keyword_matches[:8] if b.keyword_matches else [],
-                "solicitation_type": b.solicitation_type or "",
-                "posted_date": b.posted_date or "",
-            })
-        return jsonify(results)
-    finally:
-        db.close()
+    db = BidDatabase(DATABASE_FILE)
+
+    category = request.args.get("category", "")
+    status = request.args.get("status", "")
+    pipeline = request.args.get("pipeline", "")
+    min_score = int(request.args.get("min_score", 0))
+    min_win = int(request.args.get("min_win", 0))
+    keyword = request.args.get("q", "")
+    source = request.args.get("source", "")
+    show_expired = request.args.get("show_expired", "0") == "1"
+    limit = min(int(request.args.get("limit", 100)), 500)
+
+    bids = db.search(
+        project_type=category or None,
+        status=status or None,
+        pipeline_stage=pipeline or None,
+        min_score=min_score,
+        min_win_prob=min_win,
+        keyword=keyword or None,
+        source=source or None,
+        show_expired=show_expired,
+        limit=limit,
+    )
+
+    return jsonify(bids)
 
 
 @app.route("/api/run", methods=["POST"])
+@api_key_or_session
 def api_run():
-    # Allow access via API trigger key (for GitHub Actions) or login session
-    trigger_key = request.args.get("key") or request.headers.get("X-API-Key")
-    is_api_auth = API_TRIGGER_KEY and trigger_key == API_TRIGGER_KEY
-    is_session_auth = not APP_PASSWORD or session.get("authenticated")
-
-    if not is_api_auth and not is_session_auth:
-        return jsonify({"error": "unauthorized"}), 401
-
-    state = _read_scan_state()
+    state = get_scan_state()
     if state.get("running"):
-        return jsonify({"status": "already_running"}), 409
-    t = threading.Thread(target=_run_scraper_background, daemon=True)
-    t.start()
+        return jsonify({"status": "already_running", "progress": state})
+
+    def run_bg():
+        set_scan_state({"running": True, "started": datetime.now().isoformat(), "current_source": "starting..."})
+        try:
+            from main import run_scrapers
+
+            def progress_cb(idx, total, source_name):
+                set_scan_state({
+                    "running": True,
+                    "current_source": source_name,
+                    "progress": idx,
+                    "total": total,
+                    "pct": int(idx / total * 100) if total else 0,
+                })
+
+            result = run_scrapers(progress_callback=progress_cb)
+            set_scan_state({
+                "running": False,
+                "completed": datetime.now().isoformat(),
+                "result": {
+                    "total": result["total"],
+                    "new": result["new"],
+                    "errors": len(result["errors"]),
+                },
+            })
+        except Exception as e:
+            set_scan_state({"running": False, "error": str(e)})
+
+    thread = threading.Thread(target=run_bg, daemon=True)
+    thread.start()
     return jsonify({"status": "started"})
 
 
-@app.route("/api/run/status")
+@app.route("/api/scan-status")
 @login_required
-def api_run_status():
-    return jsonify(_read_scan_state())
-
-
-@app.route("/api/clear", methods=["POST"])
-@login_required
-def api_clear():
-    """Clear all bid results from the database (fresh start after fixing scrapers)."""
-    db = _get_db()
-    try:
-        db.conn.execute("DELETE FROM opportunities")
-        db.conn.commit()
-        count = db.conn.execute("SELECT changes()").fetchone()[0]
-        return jsonify({"status": "ok", "deleted": count})
-    finally:
-        db.close()
-
-
-@app.route("/api/export")
-@login_required
-def api_export():
-    """Export bids as CSV download."""
-    db = _get_db()
-    try:
-        min_score = int(request.args.get("min_score", 0))
-        bids = db.search(min_score=min_score, limit=5000)
-        if not bids:
-            return jsonify({"error": "No bids to export"}), 404
-
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow([
-            "Score", "Status", "Title", "Source", "Project Type",
-            "Location", "Due Date", "Est. Value", "Agency/Contact",
-            "Set-Aside", "URL", "Keywords",
-        ])
-        for b in bids:
-            location = ", ".join(filter(None, [b.location_city, b.location_county, b.location_state]))
-            value = b.budget_display or ""
-            if not value and b.estimated_value_min:
-                value = f"${b.estimated_value_min:,.0f}-${b.estimated_value_max:,.0f}"
-            writer.writerow([
-                b.relevance_score, b.status, b.title,
-                SOURCES.get(b.source, {}).get("name", b.source),
-                b.project_type, location, b.due_date or "",
-                value, f"{b.agency_name} / {b.contact_name}".strip(" /"),
-                b.set_aside or "", b.source_url,
-                ", ".join(b.keyword_matches[:5]) if b.keyword_matches else "",
-            ])
-
-        filename = f"oak_bids_{datetime.now().strftime('%Y%m%d')}.csv"
-        return Response(
-            output.getvalue(),
-            mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
-        )
-    finally:
-        db.close()
-
-
-@app.route("/api/email", methods=["POST"])
-@login_required
-def api_send_email():
-    """Send an email digest of recent bids."""
-    try:
-        from email_sender import EmailSender
-        db = _get_db()
-        try:
-            sender = EmailSender(db)
-            success = sender.send_digest()
-            if success:
-                return jsonify({"status": "sent"})
-            return jsonify({"error": "No credentials configured or no new bids to send. Check Settings."}), 400
-        finally:
-            db.close()
-    except ImportError as e:
-        return jsonify({"error": f"Email module error: {e}"}), 500
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+def api_scan_status():
+    return jsonify(get_scan_state())
 
 
 @app.route("/api/status", methods=["POST"])
 @login_required
 def api_update_status():
-    data = request.get_json()
-    opp_id = data.get("id")
+    data = request.json
+    key = data.get("key")
     new_status = data.get("status")
-    if not opp_id or not new_status:
-        return jsonify({"error": "Missing id or status"}), 400
-    db = _get_db()
+    new_stage = data.get("pipeline_stage")
+
+    if not key:
+        return jsonify({"error": "missing key"}), 400
+
+    db = BidDatabase(DATABASE_FILE)
+    import sqlite3
+    with sqlite3.connect(DATABASE_FILE) as conn:
+        if new_status:
+            conn.execute("UPDATE opportunities SET status=?, updated_at=datetime('now') WHERE dedup_key=?", (new_status, key))
+        if new_stage:
+            db.update_pipeline_stage(key, new_stage, changed_by="dashboard")
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/export")
+@login_required
+def api_export():
+    db = BidDatabase(DATABASE_FILE)
+    bids = db.search(show_expired=False, limit=1000)
+
+    import csv
+    import io
+    output = io.StringIO()
+    if bids:
+        writer = csv.DictWriter(output, fieldnames=bids[0].keys())
+        writer.writeheader()
+        writer.writerows(bids)
+
+    from flask import Response
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment;filename=bids_{datetime.now():%Y%m%d}.csv"},
+    )
+
+
+@app.route("/api/email", methods=["POST"])
+@api_key_or_session
+def api_email():
     try:
-        db.update_status(int(opp_id), new_status)
+        from email_sender import EmailSender
+        sender = EmailSender()
+        sender.send_digest()
         return jsonify({"ok": True})
-    finally:
-        db.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
-# ============================================================
-# PWA ROUTES
-# ============================================================
-
-@app.route("/manifest.json")
-def manifest():
-    m = {
-        "name": "OAK Builders Bid Finder",
-        "short_name": "Bid Finder",
-        "description": "Find and track commercial construction bid opportunities",
-        "start_url": "/",
-        "display": "standalone",
-        "background_color": "#f5f5f5",
-        "theme_color": "#1a472a",
-        "icons": [
-            {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"},
-        ],
-    }
-    return Response(json.dumps(m), mimetype="application/manifest+json")
+@app.route("/api/clear", methods=["POST"])
+@login_required
+def api_clear():
+    db = BidDatabase(DATABASE_FILE)
+    import sqlite3
+    with sqlite3.connect(DATABASE_FILE) as conn:
+        conn.execute("DELETE FROM opportunities")
+    return jsonify({"ok": True})
 
 
-@app.route("/sw.js")
-def service_worker():
-    sw = """
-const CACHE_NAME = 'bid-finder-v3';
-const STATIC_ASSETS = ['/icon.svg', '/manifest.json'];
-
-self.addEventListener('install', e => {
-  e.waitUntil(
-    caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(STATIC_ASSETS))
-      .then(() => self.skipWaiting())
-  );
-});
-
-self.addEventListener('activate', e => {
-  e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim())
-  );
-});
-
-self.addEventListener('fetch', e => {
-  // Only handle GET requests from same origin
-  if (e.request.method !== 'GET') return;
-  const url = new URL(e.request.url);
-  if (url.origin !== self.location.origin) return;
-
-  // Never intercept navigation requests (pages) — let browser handle redirects
-  if (e.request.mode === 'navigate') return;
-
-  // API calls: network-first, fallback to cache
-  if (url.pathname.startsWith('/api/')) {
-    e.respondWith(
-      fetch(e.request)
-        .then(r => {
-          if (r.ok && !r.redirected && r.type === 'basic') {
-            const rc = r.clone();
-            caches.open(CACHE_NAME).then(c => c.put(e.request, rc));
-          }
-          return r;
-        })
-        .catch(() => caches.match(e.request))
-    );
-    return;
-  }
-  // Static assets: cache-first, fallback to network
-  e.respondWith(
-    caches.match(e.request).then(cached => {
-      if (cached) return cached;
-      return fetch(e.request).then(r => {
-        if (r.ok && !r.redirected && r.type === 'basic') {
-          const rc = r.clone();
-          caches.open(CACHE_NAME).then(c => c.put(e.request, rc));
-        }
-        return r;
-      });
-    })
-  );
-});
-"""
-    return Response(sw.strip(), mimetype="application/javascript")
-
-
-@app.route("/icon.svg")
-def icon():
-    svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-<rect width="100" height="100" rx="18" fill="#1a472a"/>
-<text x="50" y="38" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="20" fill="white">OAK</text>
-<text x="50" y="56" text-anchor="middle" font-family="Arial" font-size="12" fill="#8fbc8f">BUILDERS</text>
-<text x="50" y="78" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="14" fill="#ffc107">BID FINDER</text>
-</svg>"""
-    return Response(svg.strip(), mimetype="image/svg+xml")
-
-
-# ============================================================
-# LOGIN HTML
-# ============================================================
-
-LOGIN_HTML = r"""<!DOCTYPE html>
+# ─── Dashboard HTML ────────────────────────────────────────────────
+DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#1a472a">
-<title>Login - OAK Builders Bid Finder</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.login-box{background:#fff;border-radius:12px;padding:40px;box-shadow:0 4px 24px rgba(0,0,0,.1);width:100%;max-width:380px;text-align:center}
-.login-box img{width:64px;height:64px;border-radius:12px;margin-bottom:16px}
-.login-box h1{color:#1a472a;font-size:22px;margin-bottom:4px}
-.login-box p{color:#888;font-size:14px;margin-bottom:24px}
-.login-box input[type=password]{width:100%;padding:12px;border:2px solid #ddd;border-radius:8px;font-size:16px;margin-bottom:16px;text-align:center;transition:.2s}
-.login-box input[type=password]:focus{border-color:#1a472a;outline:none}
-.login-box button{width:100%;padding:12px;background:#1a472a;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;transition:.15s}
-.login-box button:hover{background:#245a36}
-.error{color:#dc3545;font-size:14px;margin-bottom:12px}
-</style>
-</head>
-<body>
-<div class="login-box">
-  <img src="/icon.svg" alt="">
-  <h1>OAK Builders</h1>
-  <p>Bid Finder Dashboard</p>
-  {% if error %}<div class="error">{{ error }}</div>{% endif %}
-  <form method="POST">
-    <input type="password" name="password" placeholder="Enter password" autofocus>
-    <button type="submit">Sign In</button>
-  </form>
-</div>
-</body>
-</html>"""
-
-
-# ============================================================
-# DASHBOARD HTML
-# ============================================================
-
-DASHBOARD_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#1a472a">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OAK Builders — Bid Finder</title>
 <link rel="manifest" href="/manifest.json">
-<title>OAK Builders - Bid Finder</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;color:#333;min-height:100vh}
-
-/* NAV */
-.navbar{background:#1a472a;color:#fff;padding:0 24px;display:flex;align-items:center;height:56px;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.15)}
-.navbar .logo{font-weight:700;font-size:18px;margin-right:auto;display:flex;align-items:center;gap:10px}
-.navbar .logo img{width:28px;height:28px;border-radius:4px}
-.navbar a{color:rgba(255,255,255,.85);text-decoration:none;padding:8px 16px;border-radius:6px;font-size:14px;font-weight:500;transition:.15s}
-.navbar a:hover,.navbar a.active{background:rgba(255,255,255,.15);color:#fff}
-
-/* MAIN */
-.main{max-width:1200px;margin:0 auto;padding:20px}
-
-/* STAT CARDS */
-.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}
-.stat-card{background:#fff;border-radius:10px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.06);text-align:center;border-top:3px solid #1a472a}
-.stat-card.warn{border-top-color:#ffc107}
-.stat-card.hot{border-top-color:#dc3545}
-.stat-card .num{font-size:32px;font-weight:700;color:#1a472a}
-.stat-card .label{font-size:13px;color:#888;margin-top:4px}
-
-/* RUN BUTTON */
-.run-section{display:flex;align-items:center;gap:16px;margin-bottom:24px;flex-wrap:wrap}
-.btn-run{background:linear-gradient(135deg,#1a472a,#245a36);color:#fff;border:none;padding:14px 32px;border-radius:10px;font-size:16px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:10px;box-shadow:0 3px 12px rgba(26,71,42,.3);transition:.2s}
-.btn-run:hover{transform:translateY(-1px);box-shadow:0 5px 16px rgba(26,71,42,.4)}
-.btn-run:disabled{opacity:.6;cursor:not-allowed;transform:none}
-.btn-run .spinner{display:none;width:18px;height:18px;border:3px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
-.btn-run.running .spinner{display:inline-block}
-.btn-run.running .icon{display:none}
-@keyframes spin{to{transform:rotate(360deg)}}
-.run-status{font-size:14px;color:#666;max-width:500px}
-.run-status.error{color:#dc3545}
-
-/* TOOLBAR */
-.toolbar{background:#fff;border-radius:10px;padding:16px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,.06);display:flex;gap:12px;flex-wrap:wrap;align-items:center}
-.toolbar select,.toolbar input{padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px;background:#fff}
-.toolbar input[type=text]{min-width:200px;flex:1}
-.toolbar .filter-label{font-size:12px;color:#888;font-weight:600;text-transform:uppercase}
-
-/* CATEGORY SECTIONS */
-.cat-section{margin-bottom:28px}
-.cat-header{display:flex;align-items:center;gap:10px;margin-bottom:12px;padding-bottom:8px;border-bottom:2px solid #e0e0e0}
-.cat-header h2{font-size:18px;color:#1a472a}
-.cat-header .count{background:#1a472a;color:#fff;padding:2px 10px;border-radius:12px;font-size:13px;font-weight:600}
-
-/* BID CARDS */
-.bid-card{background:#fff;border-radius:10px;padding:18px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.06);border-left:5px solid #ccc;transition:.15s}
-.bid-card:hover{box-shadow:0 4px 16px rgba(0,0,0,.12);transform:translateY(-1px)}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a1a}
+.top-bar{background:linear-gradient(135deg,#1a472a,#2d6a4f);color:#fff;padding:16px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.top-bar h1{font-size:20px;font-weight:700}
+.top-bar .actions button{background:rgba(255,255,255,.2);color:#fff;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin-left:8px}
+.top-bar .actions button:hover{background:rgba(255,255,255,.3)}
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;padding:16px 24px}
+.stat-card{background:#fff;border-radius:10px;padding:16px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.stat-card .num{font-size:28px;font-weight:800;color:#1a472a}
+.stat-card .label{font-size:12px;color:#666;margin-top:4px}
+.filters{padding:8px 24px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.filters select,.filters input{padding:7px 12px;border:1px solid #d0d0d0;border-radius:6px;font-size:13px;background:#fff}
+.filters input[type=search]{min-width:200px}
+.scan-banner{background:#fff3cd;padding:10px 24px;font-size:13px;display:none;align-items:center;gap:10px}
+.scan-banner.active{display:flex}
+.scan-progress{height:4px;background:#e0e0e0;border-radius:2px;flex:1;overflow:hidden}
+.scan-progress-bar{height:100%;background:#2d6a4f;transition:width .3s}
+.bids-container{padding:12px 24px}
+.bid-card{background:#fff;border-radius:10px;padding:16px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,.06);border-left:4px solid #ccc;display:grid;grid-template-columns:1fr auto;gap:12px}
 .bid-card.score-high{border-left-color:#28a745}
 .bid-card.score-mid{border-left-color:#ffc107}
 .bid-card.score-low{border-left-color:#dc3545}
-.bid-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px}
-.bid-title{font-weight:700;font-size:16px;line-height:1.3;flex:1}
-.bid-title a{color:#1a472a;text-decoration:none;display:inline}
-.bid-title a:hover{text-decoration:underline;color:#245a36}
-.bid-source-tag{display:inline-block;background:#e8f5e9;color:#2e7d32;font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;margin-left:8px;white-space:nowrap;vertical-align:middle}
-.bid-info{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px 16px;margin-bottom:10px;font-size:13px;color:#555}
-.bid-info-item{display:flex;flex-direction:column}
-.bid-info-label{font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.5px;margin-bottom:1px}
-.bid-info-value{font-weight:500;color:#333}
-.bid-desc{font-size:13px;color:#666;line-height:1.4;margin-bottom:10px;padding:8px 10px;background:#fafafa;border-radius:6px}
-.bid-keywords{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px}
-.bid-kw{background:#f0f0f0;color:#555;font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap}
-.bid-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;padding-top:10px;border-top:1px solid #f0f0f0}
-.bid-actions-left{display:flex;align-items:center;gap:8px}
-.bid-actions-right{display:flex;align-items:center;gap:10px}
-.btn-view{display:inline-flex;align-items:center;gap:6px;background:#1a472a;color:#fff;padding:7px 16px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;transition:.15s}
-.btn-view:hover{background:#245a36}
-.btn-view svg{width:14px;height:14px;fill:currentColor}
-.score-badge{padding:4px 14px;border-radius:14px;font-weight:700;font-size:14px;color:#fff;white-space:nowrap}
-.score-badge.high{background:#28a745}
-.score-badge.mid{background:#ffc107;color:#333}
-.score-badge.low{background:#dc3545}
-.status-select{padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:12px;background:#f8f9fa;cursor:pointer}
-
-/* EMPTY STATE */
-.empty{text-align:center;padding:60px 20px;color:#999}
-.empty .big{font-size:48px;margin-bottom:12px}
-.empty p{font-size:16px}
-
-/* INSTALL BANNER */
-.install-banner{background:linear-gradient(135deg,#245a36,#1a472a);color:#fff;padding:12px 24px;border-radius:10px;display:none;align-items:center;gap:16px;margin-bottom:20px;cursor:pointer}
-.install-banner:hover{opacity:.95}
-.install-banner .install-text{flex:1;font-size:14px}
-.install-banner .install-btn{background:#fff;color:#1a472a;border:none;padding:8px 20px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px}
-.install-banner .dismiss{background:none;border:none;color:rgba(255,255,255,.7);cursor:pointer;font-size:18px;padding:4px 8px}
-
-/* RESPONSIVE */
-@media(max-width:768px){
-  .navbar{padding:0 12px}
-  .main{padding:12px}
-  .stats-row{grid-template-columns:repeat(2,1fr)}
-  .bid-info{grid-template-columns:1fr 1fr}
-  .bid-actions{flex-direction:column;align-items:stretch}
-  .bid-actions-left,.bid-actions-right{justify-content:space-between}
-  .toolbar input[type=text]{min-width:120px}
-}
-@media(max-width:480px){
-  .stats-row{grid-template-columns:1fr 1fr}
-  .bid-title{font-size:14px}
-}
+.bid-card.dont-miss{border-left-color:#ff6b35;background:#fffaf7}
+.bid-title{font-weight:700;font-size:14px}
+.bid-title a{color:#1a472a;text-decoration:none}
+.bid-title a:hover{text-decoration:underline}
+.bid-meta{font-size:12px;color:#555;line-height:1.8;margin-top:6px}
+.bid-actions{display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-green{background:#d4edda;color:#155724}.badge-yellow{background:#fff3cd;color:#856404}
+.badge-red{background:#f8d7da;color:#721c24}.badge-fire{background:#ff6b35;color:#fff}
+.badge-blue{background:#cce5ff;color:#004085}.badge-purple{background:#e8d5f5;color:#4a148c}
+.bid-actions select{font-size:11px;padding:4px 8px;border:1px solid #d0d0d0;border-radius:4px}
+.empty-state{text-align:center;padding:60px 24px;color:#888;font-size:15px}
+.footer{text-align:center;padding:20px;font-size:11px;color:#aaa}
+@media(max-width:600px){.stats-row{grid-template-columns:repeat(2,1fr)}.bid-card{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-
-<nav class="navbar">
-  <div class="logo">
-    <img src="/icon.svg" alt=""> OAK Builders Bid Finder
-  </div>
-  <a href="/" class="active">Dashboard</a>
-  <a href="/settings">Settings</a>
-</nav>
-
-<!-- Install Banner -->
-<div class="main">
-<div class="install-banner" id="installBanner">
-  <div class="install-text">Install Bid Finder on your desktop for quick access</div>
-  <button class="install-btn" id="installBtn">Install App</button>
-  <button class="dismiss" id="dismissInstall">&times;</button>
-</div>
-
-<!-- Stats -->
-<div class="stats-row" id="statsRow">
-  <div class="stat-card"><div class="num" id="statTotal">-</div><div class="label">Total Bids</div></div>
-  <div class="stat-card"><div class="num" id="statNew">-</div><div class="label">New / Unreviewed</div></div>
-  <div class="stat-card warn"><div class="num" id="statHigh">-</div><div class="label">High Relevance (70+)</div></div>
-  <div class="stat-card hot"><div class="num" id="statDue">-</div><div class="label">Due This Week</div></div>
-</div>
-
-<!-- Run Button -->
-<div class="run-section">
-  <button class="btn-run" id="runBtn" onclick="startScan()">
-    <span class="icon">&#9654;</span>
-    <span class="spinner"></span>
-    Run Scan Now
-  </button>
-  <button class="btn-run" style="background:#dc3545;margin-left:8px;font-size:0.85rem;padding:10px 16px" onclick="clearAndRescan()">Clear &amp; Rescan</button>
-  <button class="btn-run" style="background:#17a2b8;margin-left:8px;font-size:0.85rem;padding:10px 16px" onclick="exportCSV()">&#11123; Export CSV</button>
-  <button class="btn-run" style="background:#6f42c1;margin-left:8px;font-size:0.85rem;padding:10px 16px" onclick="sendEmail()">&#9993; Send Email</button>
-  <div class="run-status" id="runStatus"></div>
-</div>
-
-<!-- Filters -->
-<div class="toolbar">
-  <div>
-    <div class="filter-label">Category</div>
-    <select id="filterType" onchange="loadBids()">
-      <option value="">All Types</option>
-      <option value="waterproofing">Waterproofing</option>
-      <option value="tenant_improvements">Tenant Improvements</option>
-      <option value="general_contracting">General Contracting</option>
-      <option value="government">Government</option>
-      <option value="general">General</option>
-    </select>
-  </div>
-  <div>
-    <div class="filter-label">Status</div>
-    <select id="filterStatus" onchange="loadBids()">
-      <option value="">All Statuses</option>
-      <option value="new">New</option>
-      <option value="reviewed">Reviewed</option>
-      <option value="bid">Bid</option>
-      <option value="no_bid">No Bid</option>
-      <option value="awarded">Awarded</option>
-    </select>
-  </div>
-  <div>
-    <div class="filter-label">Min Score</div>
-    <select id="filterScore" onchange="loadBids()">
-      <option value="0">Any Score</option>
-      <option value="20" selected>20+</option>
-      <option value="30">30+</option>
-      <option value="50">50+</option>
-      <option value="60">60+</option>
-      <option value="70">70+</option>
-      <option value="80">80+</option>
-    </select>
-  </div>
-  <div style="flex:1">
-    <div class="filter-label">Search</div>
-    <input type="text" id="filterQ" placeholder="Search bids..." onkeyup="debounceSearch()">
+<div class="top-bar">
+  <h1>OAK Builders — Bid Finder</h1>
+  <div class="actions">
+    <button onclick="startScan()">Scan Now</button>
+    <button onclick="exportCSV()">Export CSV</button>
+    <button onclick="sendEmail()">Email Digest</button>
   </div>
 </div>
 
-<!-- Bid Results -->
-<div id="bidResults">
-  <div class="empty"><div class="big">&#128269;</div><p>Click "Run Scan Now" to find bid opportunities</p></div>
+<div class="scan-banner" id="scanBanner">
+  <span id="scanText">Scanning...</span>
+  <div class="scan-progress"><div class="scan-progress-bar" id="scanBar" style="width:0%"></div></div>
 </div>
 
-</div><!-- .main -->
+<div class="stats-row" id="statsRow"></div>
+
+<div class="filters">
+  <select id="filterCategory" onchange="loadBids()">
+    <option value="">All Types</option>
+    <option value="waterproofing">Waterproofing</option>
+    <option value="tenant_improvements">Tenant Improvements</option>
+    <option value="general_contracting">General Contracting</option>
+    <option value="commercial_private">Commercial/Private</option>
+    <option value="civil_infrastructure">Civil/Infrastructure</option>
+  </select>
+  <select id="filterPipeline" onchange="loadBids()">
+    <option value="">All Stages</option>
+    <option value="discovered">Discovered</option>
+    <option value="qualified">Qualified</option>
+    <option value="estimating">Estimating</option>
+    <option value="submitted">Submitted</option>
+    <option value="awarded">Awarded</option>
+  </select>
+  <select id="filterStatus" onchange="loadBids()">
+    <option value="">All Status</option>
+    <option value="new">New</option>
+    <option value="reviewed">Reviewed</option>
+    <option value="bid">Bid</option>
+    <option value="no_bid">No Bid</option>
+  </select>
+  <select id="filterScore" onchange="loadBids()">
+    <option value="0">Any Score</option>
+    <option value="50">50+</option>
+    <option value="70" selected>70+</option>
+    <option value="80">80+ (Don't Miss)</option>
+  </select>
+  <input type="search" id="filterKeyword" placeholder="Search keywords..." onkeyup="debounceSearch()">
+</div>
+
+<div class="bids-container" id="bidsContainer">
+  <div class="empty-state">Loading opportunities...</div>
+</div>
+
+<div class="footer">OAK Builders Bid Finder v2</div>
 
 <script>
-// ---- PWA Install ----
-let deferredPrompt;
-window.addEventListener('beforeinstallprompt', e => {
-  e.preventDefault();
-  deferredPrompt = e;
-  document.getElementById('installBanner').style.display = 'flex';
-});
-document.getElementById('installBtn').onclick = async () => {
-  if (!deferredPrompt) return;
-  deferredPrompt.prompt();
-  await deferredPrompt.userChoice;
-  deferredPrompt = null;
-  document.getElementById('installBanner').style.display = 'none';
-};
-document.getElementById('dismissInstall').onclick = e => {
-  e.stopPropagation();
-  document.getElementById('installBanner').style.display = 'none';
-};
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+let searchTimer;
+function debounceSearch(){clearTimeout(searchTimer);searchTimer=setTimeout(loadBids,400)}
 
-// ---- Stats ----
-async function loadStats() {
-  try {
-    const r = await fetch('/api/stats');
-    const s = await r.json();
-    document.getElementById('statTotal').textContent = s.total || 0;
-    document.getElementById('statNew').textContent = s.new || 0;
-    document.getElementById('statHigh').textContent = s.high_relevance || 0;
-    document.getElementById('statDue').textContent = s.due_this_week || 0;
-  } catch(e) {}
+async function loadStats(){
+  try{
+    const r=await fetch('/api/stats');const s=await r.json();
+    document.getElementById('statsRow').innerHTML=`
+      <div class="stat-card"><div class="num">${s.active||0}</div><div class="label">Active</div></div>
+      <div class="stat-card"><div class="num">${s.new_today||0}</div><div class="label">New Today</div></div>
+      <div class="stat-card"><div class="num">${s.high_relevance||0}</div><div class="label">Score 70+</div></div>
+      <div class="stat-card"><div class="num">${s.due_this_week||0}</div><div class="label">Due This Week</div></div>
+      <div class="stat-card"><div class="num">${(s.pipeline||{}).qualified||0}</div><div class="label">Qualified</div></div>
+      <div class="stat-card"><div class="num">${(s.pipeline||{}).estimating||0}</div><div class="label">Estimating</div></div>
+    `;
+  }catch(e){console.error(e)}
 }
 
-// ---- Export CSV ----
-function exportCSV() {
-  const score = document.getElementById('filterScore').value || '0';
-  window.location.href = '/api/export?min_score=' + score;
-}
-
-// ---- Send Email ----
-async function sendEmail() {
-  const status = document.getElementById('runStatus');
-  status.textContent = 'Sending email digest...';
-  try {
-    const r = await fetch('/api/email', {method:'POST'});
-    const d = await r.json();
-    if (r.ok) {
-      status.textContent = 'Email sent successfully!';
-    } else {
-      status.textContent = 'Email failed: ' + (d.error || 'Unknown error');
-      status.className = 'run-status error';
-    }
-  } catch(e) {
-    status.textContent = 'Email failed: ' + e.message;
-    status.className = 'run-status error';
-  }
-}
-
-// ---- Clear & Rescan ----
-async function clearAndRescan() {
-  if (!confirm('This will delete ALL current bid results and run a fresh scan. Continue?')) return;
-  try {
-    const r = await fetch('/api/clear', {method:'POST'});
-    const d = await r.json();
-    document.getElementById('runStatus').textContent = 'Cleared ' + d.deleted + ' old results. Starting fresh scan...';
-    loadStats();
-    loadBids();
-    startScan();
-  } catch(e) {
-    document.getElementById('runStatus').textContent = 'Clear failed: ' + e.message;
-  }
-}
-
-// ---- Run Scan ----
-let pollTimer = null;
-async function startScan() {
-  const btn = document.getElementById('runBtn');
-  const status = document.getElementById('runStatus');
-  btn.classList.add('running');
-  btn.disabled = true;
-  status.textContent = 'Starting scan...';
-  status.className = 'run-status';
-
-  try {
-    const r = await fetch('/api/run', {method:'POST'});
-    if (r.status === 409) {
-      status.textContent = 'A scan is already running...';
-      pollProgress();
-      return;
-    }
-    pollProgress();
-  } catch(e) {
-    status.textContent = 'Failed to start scan: ' + e.message;
-    status.className = 'run-status error';
-    btn.classList.remove('running');
-    btn.disabled = false;
-  }
-}
-
-function pollProgress() {
-  if (pollTimer) clearInterval(pollTimer);
-  let pollCount = 0;
-  pollTimer = setInterval(async () => {
-    pollCount++;
-    // Safety: stop polling after 9 minutes no matter what (~60 sources)
-    if (pollCount > 360) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-      document.getElementById('runBtn').classList.remove('running');
-      document.getElementById('runBtn').disabled = false;
-      document.getElementById('runStatus').textContent = 'Scan timed out. Refresh the page to check results.';
-      loadStats();
-      loadBids();
-      return;
-    }
-    try {
-      const r = await fetch('/api/run/status');
-      const s = await r.json();
-      const status = document.getElementById('runStatus');
-      const btn = document.getElementById('runBtn');
-
-      if (s.progress.length) status.textContent = s.progress[s.progress.length - 1];
-
-      if (!s.running) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-        btn.classList.remove('running');
-        btn.disabled = false;
-        if (s.error) {
-          status.textContent = 'Error: ' + s.error;
-          status.className = 'run-status error';
-        } else if (s.summary) {
-          const sm = s.summary;
-          const errCount = (sm.errors && sm.errors.length) || 0;
-          const srcCount = sm.sources_searched ? sm.sources_searched.length : 0;
-          const okCount = srcCount - errCount;
-          let msg = `Done! ${sm.total_found} bids found (${sm.new_opportunities} new) from ${okCount} of ${srcCount} sources`;
-          if (errCount) msg += ` (${errCount} unavailable)`;
-          status.innerHTML = msg;
-          if (errCount && sm.errors) {
-            const detailBtn = document.createElement('a');
-            detailBtn.href = '#';
-            detailBtn.style.cssText = 'margin-left:8px;font-size:0.85em;color:#666;';
-            detailBtn.textContent = '[view details]';
-            detailBtn.onclick = (e) => {
-              e.preventDefault();
-              const existing = document.getElementById('errorDetails');
-              if (existing) { existing.remove(); return; }
-              const div = document.createElement('div');
-              div.id = 'errorDetails';
-              div.style.cssText = 'margin-top:10px;padding:12px;background:#fff8f0;border:1px solid #f0c0a0;border-radius:6px;font-size:0.82em;max-height:200px;overflow-y:auto;text-align:left;';
-              div.innerHTML = '<b>Unavailable sources:</b><br>' +
-                sm.errors.map(e => {
-                  const short = e.length > 120 ? e.substring(0,120) + '...' : e;
-                  return '• ' + short.replace(/</g,'&lt;');
-                }).join('<br>');
-              status.parentElement.appendChild(div);
-            };
-            status.appendChild(detailBtn);
-          }
-          status.className = 'run-status';
-        } else {
-          status.textContent = 'Scan finished. Refresh to see results.';
-        }
-        loadStats();
-        loadBids();
-      }
-    } catch(e) {}
-  }, 1500);
-}
-
-// ---- Load Bids ----
-const CAT_NAMES = {
-  waterproofing: 'Waterproofing & Envelope',
-  tenant_improvements: 'Tenant Improvements',
-  general_contracting: 'General Contracting',
-  government: 'Government / Federal',
-  general: 'General',
-  other: 'Other'
-};
-const CAT_ORDER = ['waterproofing','tenant_improvements','general_contracting','government','general','other'];
-
-let searchTimeout;
-function debounceSearch() {
-  clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(loadBids, 300);
-}
-
-async function loadBids() {
-  const params = new URLSearchParams();
-  const type = document.getElementById('filterType').value;
-  const status = document.getElementById('filterStatus').value;
-  const score = document.getElementById('filterScore').value;
-  const q = document.getElementById('filterQ').value;
-  if (type) params.set('type', type);
-  if (status) params.set('status', status);
-  if (score) params.set('min_score', score);
-  if (q) params.set('q', q);
-  params.set('limit', '200');
-
-  try {
-    const r = await fetch('/api/bids?' + params);
-    const bids = await r.json();
+async function loadBids(){
+  try{
+    const p=new URLSearchParams();
+    const cat=document.getElementById('filterCategory').value;
+    const pipe=document.getElementById('filterPipeline').value;
+    const st=document.getElementById('filterStatus').value;
+    const sc=document.getElementById('filterScore').value;
+    const q=document.getElementById('filterKeyword').value;
+    if(cat)p.set('category',cat);
+    if(pipe)p.set('pipeline',pipe);
+    if(st)p.set('status',st);
+    if(sc)p.set('min_score',sc);
+    if(q)p.set('q',q);
+    const r=await fetch('/api/bids?'+p.toString());
+    const bids=await r.json();
     renderBids(bids);
-  } catch(e) {
-    document.getElementById('bidResults').innerHTML = '<div class="empty"><p>Error loading bids</p></div>';
-  }
+  }catch(e){console.error(e)}
 }
 
-function renderBids(bids) {
-  const container = document.getElementById('bidResults');
-  if (!bids.length) {
-    container.innerHTML = '<div class="empty"><div class="big">&#128269;</div><p>No bids found. Try adjusting filters or run a scan.</p></div>';
-    return;
-  }
+function renderBids(bids){
+  const c=document.getElementById('bidsContainer');
+  if(!bids.length){c.innerHTML='<div class="empty-state">No opportunities match your filters</div>';return}
+  c.innerHTML=bids.map(b=>{
+    const score=b.relevance_score||0;
+    const win=b.win_probability||0;
+    let cls='score-low';
+    if(score>=80)cls='dont-miss';
+    else if(score>=70)cls='score-high';
+    else if(score>=50)cls='score-mid';
 
-  // Group by category
-  const grouped = {};
-  bids.forEach(b => {
-    const cat = b.project_type || 'other';
-    if (!grouped[cat]) grouped[cat] = [];
-    grouped[cat].push(b);
-  });
+    let scoreBadge=`<span class="badge badge-red">${score}</span>`;
+    if(score>=80)scoreBadge=`<span class="badge badge-fire">🔥 ${score}</span>`;
+    else if(score>=70)scoreBadge=`<span class="badge badge-green">${score}</span>`;
+    else if(score>=50)scoreBadge=`<span class="badge badge-yellow">${score}</span>`;
 
-  let html = '';
-  CAT_ORDER.forEach(cat => {
-    const list = grouped[cat];
-    if (!list || !list.length) return;
-    const name = CAT_NAMES[cat] || cat.replace(/_/g, ' ');
-    html += `<div class="cat-section">
-      <div class="cat-header"><h2>${name}</h2><span class="count">${list.length}</span></div>`;
-    list.forEach(b => { html += renderCard(b); });
-    html += '</div>';
-  });
+    const winBadge=win?` <span class="badge badge-purple">Win: ${win}%</span>`:'';
+    const loc=[b.location_city,b.location_state].filter(Boolean).join(', ')||'TBD';
+    const due=b.due_date||'TBD';
+    const bond=b.bonding_required?'💰 Bond Required • ':'';
+    const prebid=b.pre_bid_date?`<br>📅 Pre-bid: ${b.pre_bid_date}${b.pre_bid_mandatory?' <strong>(MANDATORY)</strong>':''}` :'';
+    const source=b.source||'?';
+    const agency=b.agency||'Unknown';
+    const url=b.source_url||'#';
+    const title=b.title||'Untitled';
+    const key=b.dedup_key||'';
+    const curStatus=b.status||'new';
+    const curPipeline=b.pipeline_stage||'discovered';
 
-  // Any categories not in CAT_ORDER
-  Object.keys(grouped).forEach(cat => {
-    if (CAT_ORDER.includes(cat)) return;
-    const list = grouped[cat];
-    html += `<div class="cat-section">
-      <div class="cat-header"><h2>${cat}</h2><span class="count">${list.length}</span></div>`;
-    list.forEach(b => { html += renderCard(b); });
-    html += '</div>';
-  });
-
-  container.innerHTML = html;
-}
-
-function renderCard(b) {
-  const scoreClass = b.score >= 70 ? 'high' : b.score >= 50 ? 'mid' : 'low';
-  const cardClass = b.score >= 70 ? 'score-high' : b.score >= 50 ? 'score-mid' : 'score-low';
-  const statusOpts = ['new','reviewed','bid','no_bid','awarded'].map(s =>
-    `<option value="${s}" ${s===b.status?'selected':''}>${s.replace('_',' ')}</option>`
-  ).join('');
-
-  // Keyword tags
-  let kwHtml = '';
-  if (b.keywords && b.keywords.length) {
-    kwHtml = '<div class="bid-keywords">' +
-      b.keywords.map(k => `<span class="bid-kw">${escHtml(k)}</span>`).join('') +
-      '</div>';
-  }
-
-  // Solicitation type badge
-  const solType = b.solicitation_type ? `<span class="bid-source-tag">${escHtml(b.solicitation_type)}</span>` : '';
-
-  return `<div class="bid-card ${cardClass}">
-    <div class="bid-top">
-      <div class="bid-title">
-        <a href="${b.source_url}" target="_blank" rel="noopener">${escHtml(b.title)}</a>
-        ${solType}
+    return `<div class="bid-card ${cls}">
+      <div>
+        <div class="bid-title"><a href="${url}" target="_blank">${title}</a></div>
+        <div class="bid-meta">
+          ${scoreBadge}${winBadge} <span class="badge badge-blue">${source}</span><br>
+          📍 ${loc} • 📅 Due: ${due} • 🏢 ${agency}<br>
+          ${bond}${b.scope_category?'Scope: '+b.scope_category+' • ':''}${b.budget_display||''}${prebid}
+        </div>
       </div>
-      <span class="score-badge ${scoreClass}">${b.score}</span>
-    </div>
-
-    <div class="bid-info">
-      <div class="bid-info-item">
-        <span class="bid-info-label">Source</span>
-        <span class="bid-info-value">${escHtml(b.source_name || b.source)}</span>
+      <div class="bid-actions">
+        <select onchange="updateStatus('${key}','status',this.value)">
+          ${['new','reviewed','bid','no_bid','awarded','lost'].map(s=>`<option value="${s}"${s===curStatus?' selected':''}>${s}</option>`).join('')}
+        </select>
+        <select onchange="updateStatus('${key}','pipeline_stage',this.value)">
+          ${['discovered','qualified','estimating','submitted','awarded','lost'].map(s=>`<option value="${s}"${s===curPipeline?' selected':''}>${s}</option>`).join('')}
+        </select>
       </div>
-      <div class="bid-info-item">
-        <span class="bid-info-label">Location</span>
-        <span class="bid-info-value">${escHtml(b.location || 'N/A')}</span>
-      </div>
-      ${b.agency ? `<div class="bid-info-item">
-        <span class="bid-info-label">Agency</span>
-        <span class="bid-info-value">${escHtml(b.agency)}</span>
-      </div>` : ''}
-      ${b.due_date ? `<div class="bid-info-item">
-        <span class="bid-info-label">Due Date</span>
-        <span class="bid-info-value">${escHtml(b.due_date)}</span>
-      </div>` : ''}
-      ${b.value ? `<div class="bid-info-item">
-        <span class="bid-info-label">Est. Value</span>
-        <span class="bid-info-value">${escHtml(b.value)}</span>
-      </div>` : ''}
-      ${b.set_aside ? `<div class="bid-info-item">
-        <span class="bid-info-label">Set-Aside</span>
-        <span class="bid-info-value">${escHtml(b.set_aside)}</span>
-      </div>` : ''}
-    </div>
-
-    ${b.description ? `<div class="bid-desc">${escHtml(b.description)}</div>` : ''}
-    ${kwHtml}
-
-    <div class="bid-actions">
-      <div class="bid-actions-left">
-        <a class="btn-view" href="${b.source_url}" target="_blank" rel="noopener">
-          <svg viewBox="0 0 20 20"><path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z"/><path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z"/></svg>
-          View Solicitation
-        </a>
-        ${b.source_page && b.source_page !== b.source_url ? `<a class="btn-view" href="${b.source_page}" target="_blank" rel="noopener" style="background:#6c757d">Browse Source</a>` : ''}
-        ${b.contact_email ? `<a href="mailto:${escHtml(b.contact_email)}" style="font-size:13px;color:#1a472a;text-decoration:none" title="${escHtml(b.contact_name || '')}">&#9993; Contact</a>` : ''}
-      </div>
-      <div class="bid-actions-right">
-        <select class="status-select" onchange="updateStatus(${b.id}, this.value)">${statusOpts}</select>
-      </div>
-    </div>
-  </div>`;
+    </div>`;
+  }).join('');
 }
 
-function escHtml(s) {
-  if (!s) return '';
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+async function updateStatus(key,field,val){
+  const body={key};body[field]=val;
+  await fetch('/api/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  loadStats();
 }
 
-async function updateStatus(id, status) {
-  try {
-    await fetch('/api/status', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({id, status})
-    });
-  } catch(e) { alert('Failed to update status'); }
+async function startScan(){
+  const r=await fetch('/api/run',{method:'POST'});
+  if(r.ok)pollScan();
 }
 
-// ---- Filter Persistence (localStorage) ----
-const FILTER_KEYS = ['filterType', 'filterStatus', 'filterScore', 'filterQ'];
-
-function saveFilters() {
-  const filters = {};
-  FILTER_KEYS.forEach(id => { filters[id] = document.getElementById(id).value; });
-  localStorage.setItem('bidFinderFilters', JSON.stringify(filters));
+function pollScan(){
+  const banner=document.getElementById('scanBanner');
+  banner.classList.add('active');
+  const interval=setInterval(async()=>{
+    const r=await fetch('/api/scan-status');
+    const s=await r.json();
+    if(s.running){
+      document.getElementById('scanText').textContent=`Scanning: ${s.current_source||'...'}`;
+      document.getElementById('scanBar').style.width=(s.pct||0)+'%';
+    }else{
+      clearInterval(interval);
+      banner.classList.remove('active');
+      loadStats();loadBids();
+    }
+  },1500);
 }
 
-function restoreFilters() {
-  try {
-    const saved = JSON.parse(localStorage.getItem('bidFinderFilters'));
-    if (!saved) return;
-    FILTER_KEYS.forEach(id => {
-      if (saved[id] !== undefined) document.getElementById(id).value = saved[id];
-    });
-  } catch(e) {}
+async function exportCSV(){window.location='/api/export'}
+async function sendEmail(){
+  const r=await fetch('/api/email',{method:'POST'});
+  const d=await r.json();
+  alert(d.ok?'Email sent!':'Error: '+(d.error||'unknown'));
 }
 
-// Wrap loadBids to auto-save filters
-const _origLoadBids = loadBids;
-loadBids = function() { saveFilters(); return _origLoadBids(); };
-
-// ---- Init ----
-restoreFilters();
-loadStats();
-loadBids();
-
-// Check if scan is already running (page reload)
-fetch('/api/run/status').then(r=>r.json()).then(s => {
-  if (s.running) {
-    document.getElementById('runBtn').classList.add('running');
-    document.getElementById('runBtn').disabled = true;
-    document.getElementById('runStatus').textContent = 'Scan in progress...';
-    pollProgress();
-  }
-});
+// Initial load
+loadStats();loadBids();
+// Check if scan is running
+fetch('/api/scan-status').then(r=>r.json()).then(s=>{if(s.running)pollScan()});
 </script>
 </body>
 </html>"""
 
 
-# ============================================================
-# SETTINGS HTML
-# ============================================================
-
-SETTINGS_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#1a472a">
-<link rel="manifest" href="/manifest.json">
-<title>Settings - OAK Builders Bid Finder</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;color:#333}
-.navbar{background:#1a472a;color:#fff;padding:0 24px;display:flex;align-items:center;height:56px;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.15)}
-.navbar .logo{font-weight:700;font-size:18px;margin-right:auto;display:flex;align-items:center;gap:10px}
-.navbar .logo img{width:28px;height:28px;border-radius:4px}
-.navbar a{color:rgba(255,255,255,.85);text-decoration:none;padding:8px 16px;border-radius:6px;font-size:14px;font-weight:500;transition:.15s}
-.navbar a:hover,.navbar a.active{background:rgba(255,255,255,.15);color:#fff}
-.main{max-width:860px;margin:0 auto;padding:24px 20px}
-h1{color:#1a472a;margin-bottom:4px;font-size:24px}
-h1 small{font-weight:normal;color:#888;font-size:14px}
-.section{background:#fff;border:1px solid #dee2e6;padding:24px;margin:20px 0;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
-.section h2{margin-top:0;color:#1a472a;font-size:18px;border-bottom:2px solid #e9ecef;padding-bottom:8px}
-label{display:block;margin:12px 0 4px;font-weight:bold;font-size:14px}
-label.inline{display:inline;font-weight:normal}
-input[type=text],input[type=password],input[type=email]{width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px}
-input[type=checkbox]{margin-right:6px}
-.hint{color:#888;font-size:12px;margin-top:2px}
-.hint a{color:#1a472a}
-.source-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
-.source-card{padding:12px;border:1px solid #ddd;border-radius:6px}
-.source-card.free{border-left:4px solid #28a745}
-.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold;color:#fff;vertical-align:middle}
-.badge.free{background:#28a745}
-.badge.paid{background:#ffc107;color:#333}
-.paid-source{background:#fefefe;border:1px solid #e0e0e0;border-left:4px solid #ffc107;padding:16px;margin:12px 0;border-radius:6px}
-.paid-source h4{margin:0 0 10px}
-.paid-source .fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-button[type=submit]{background:#1a472a;color:#fff;padding:12px 30px;border:none;border-radius:8px;cursor:pointer;font-size:16px;font-weight:600;margin-top:20px}
-button[type=submit]:hover{background:#245a36}
-.flash{padding:12px;background:#d4edda;border:1px solid #c3e6cb;border-radius:6px;margin:12px 0;color:#155724}
-@media(max-width:600px){.source-grid,.paid-source .fields{grid-template-columns:1fr}}
-</style>
-</head>
-<body>
-<nav class="navbar">
-  <div class="logo"><img src="/icon.svg" alt=""> OAK Builders Bid Finder</div>
-  <a href="/">Dashboard</a>
-  <a href="/settings" class="active">Settings</a>
-</nav>
-<div class="main">
-<h1>Settings<br><small>Configure credentials and data sources</small></h1>
-{% for msg in get_flashed_messages() %}<div class="flash">{{ msg }}</div>{% endfor %}
-<form method="POST">
-  <div class="section">
-    <h2>Email Configuration (Gmail SMTP)</h2>
-    <p class="hint">Use a Gmail App Password. Go to myaccount.google.com &gt; Security &gt; 2-Step Verification &gt; App Passwords.</p>
-    <label>Gmail Address</label>
-    <input type="email" name="gmail_address" value="{{ s.gmail_address }}" placeholder="yourname@gmail.com">
-    <label>Gmail App Password</label>
-    <input type="password" name="gmail_app_password" value="{{ s.gmail_app_password }}" placeholder="xxxx xxxx xxxx xxxx">
-    <label>Recipients (comma-separated emails)</label>
-    <input type="text" name="email_recipients" value="{{ s.email_recipients | join(', ') }}" placeholder="you@email.com, team@email.com">
-  </div>
-  <div class="section">
-    <h2>Google Sheets Integration</h2>
-    <p class="hint">Requires a Google Cloud service account JSON key file (service_account.json) in the project folder.</p>
-    <label><input type="checkbox" name="google_sheets_enabled" {{ 'checked' if s.google_sheets_enabled }}><span class="inline">Enable Google Sheets sync</span></label>
-    <label>Spreadsheet Name</label>
-    <input type="text" name="google_sheet_name" value="{{ s.google_sheet_name }}">
-  </div>
-  <div class="section">
-    <h2>API Keys</h2>
-    <label>SAM.gov API Key (free)</label>
-    <input type="text" name="sam_gov_api_key" value="{{ s.sam_gov_api_key }}" placeholder="Get free key at api.data.gov/signup">
-    <p class="hint">Free API key from <a href="https://api.data.gov/signup/" target="_blank">api.data.gov/signup</a></p>
-  </div>
-  <div class="section">
-    <h2>BidNet Direct Login</h2>
-    <p class="hint">Authenticated access to BidNet Direct for full bid listings and documents.</p>
-    <label>Email</label>
-    <input type="email" name="bidnet_email" value="{{ s.bidnet_email }}" placeholder="your@email.com">
-    <label>Password</label>
-    <input type="password" name="bidnet_password" value="{{ s.bidnet_password }}" placeholder="BidNet password">
-  </div>
-  <div class="section">
-    <h2>OpenGov Procurement Login</h2>
-    <p class="hint">Authenticated access to OpenGov Procurement for VA/DC/MD bid listings.</p>
-    <label>Email</label>
-    <input type="email" name="opengov_email" value="{{ s.opengov_email }}" placeholder="your@email.com">
-    <label>Password</label>
-    <input type="password" name="opengov_password" value="{{ s.opengov_password }}" placeholder="OpenGov password">
-  </div>
-  <div class="section">
-    <h2>Data Sources</h2>
-    <h3>Free Sources (Always Available)</h3>
-    <div class="source-grid">
-      {% for key, src in sources.items() %}
-      {% if src.get('cost', 'free') == 'free' %}
-      <div class="source-card free">
-        <span class="badge free">FREE</span>
-        <strong>{{ src.name }}</strong><br>
-        <small style="color:#666">{{ src.type | title }} &bull; {{ 'Enabled' if src.enabled else 'Disabled' }}</small>
-      </div>
-      {% endif %}
-      {% endfor %}
-    </div>
-    <h3 style="margin-top:24px">Paid Sources (Add Credentials When Ready)</h3>
-    <p class="hint">Enable and enter credentials once you have an active subscription.</p>
-    {% for key, paid in s.paid_sources.items() %}
-    <div class="paid-source">
-      <h4><span class="badge paid">PAID</span> {{ key | replace('_', ' ') | title }}</h4>
-      <label><input type="checkbox" name="paid_{{ key }}_enabled" {{ 'checked' if paid.enabled }}><span class="inline">Enable this source</span></label>
-      <div class="fields">
-        <div><label>Username / Email</label><input type="text" name="paid_{{ key }}_username" value="{{ paid.username }}"></div>
-        <div><label>Password</label><input type="password" name="paid_{{ key }}_password" value="{{ paid.password }}"></div>
-      </div>
-    </div>
-    {% endfor %}
-  </div>
-  <button type="submit">Save Settings</button>
-</form>
-</div>
-</body>
-</html>"""
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-# Clear stale scan state on startup (if a previous scan crashed mid-run)
-try:
-    _old = _read_scan_state()
-    if _old.get("running"):
-        _old["running"] = False
-        _old["error"] = "Scan interrupted by server restart"
-        _write_scan_state(_old)
-except Exception:
-    pass
+# ─── PWA manifest ──────────────────────────────────────────────────
+@app.route("/manifest.json")
+def manifest():
+    return jsonify({
+        "name": "OAK Bid Finder",
+        "short_name": "BidFinder",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#1a472a",
+        "theme_color": "#1a472a",
+    })
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    debug = os.environ.get("FLASK_ENV") != "production"
-    print("=" * 50)
-    print("  OAK Builders - Bid Finder Dashboard")
-    print(f"  Open: http://localhost:{port}")
-    if APP_PASSWORD:
-        print(f"  Password protection: ON")
-    else:
-        print(f"  Password protection: OFF (set APP_PASSWORD to enable)")
-    print()
-    print("  To install on desktop:")
-    print("  1. Open in Chrome/Edge")
-    print("  2. Click the install icon in the address bar")
-    print("     or click 'Install App' banner on the page")
-    print("=" * 50)
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    app.run(host="0.0.0.0", port=port, debug=True)

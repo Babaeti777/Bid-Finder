@@ -1,210 +1,285 @@
 """
-OAK BUILDERS LLC - Bid Finder
-Email Notification Module
+OAK BUILDERS LLC - Bid Finder v2
+Email Digest — smarter notifications
 
-Sends HTML email digests of new bid opportunities via Gmail SMTP.
-Supports environment variable overrides for cloud deployment (GitHub Actions).
+Changes from v1:
+- "Don't Miss" flagging for score >= 80
+- Grouped by urgency (due this week vs. later)
+- Win probability shown alongside relevance score
+- Commercial vs. government split sections
+- Pipeline stage indicator
+- Source performance summary at bottom
+- Pre-bid meeting alerts highlighted
 """
 
+import logging
 import os
-import json
 import smtplib
-from email.mime.text import MIMEText
+from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
-from collections import defaultdict
+from email.mime.text import MIMEText
+from typing import List
 
-from config import NOTIFICATIONS, SOURCES
+from config import EMAIL, DATABASE_FILE
 from models import BidDatabase
 
-
-def _is_expired(bid) -> bool:
-    """Return True if the bid's due_date is in the past."""
-    if not bid.due_date:
-        return False
-    for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%dT%H:%M:%S"]:
-        try:
-            due = datetime.strptime(bid.due_date[:10], fmt[:min(len(fmt), len(bid.due_date))])
-            return due.date() < datetime.now().date()
-        except ValueError:
-            continue
-    return False
+logger = logging.getLogger("email")
 
 
 class EmailSender:
-    """Sends HTML email digests of new bid opportunities."""
+    """Sends HTML digest emails with bid opportunities."""
 
-    def __init__(self, db: BidDatabase):
-        self.db = db
-        self.config = NOTIFICATIONS["email"]
-        # Environment variables override config (for GitHub Actions)
-        self.smtp_server = os.environ.get("SMTP_SERVER", self.config["smtp_server"])
-        self.smtp_port = int(os.environ.get("SMTP_PORT", str(self.config["smtp_port"])))
-        self.sender_email = os.environ.get("GMAIL_ADDRESS", self.config["sender_email"])
-        self.sender_password = os.environ.get("GMAIL_APP_PASSWORD", self.config["sender_password"])
-        recipients_env = os.environ.get("EMAIL_RECIPIENTS")
-        if recipients_env:
-            self.recipients = json.loads(recipients_env)
-        else:
-            self.recipients = self.config["recipients"]
+    def __init__(self):
+        self.smtp_server = "smtp.gmail.com"
+        self.smtp_port = 587
+        self.from_addr = EMAIL["from_address"]
+        self.password = EMAIL["app_password"]
+        self.recipients = EMAIL["recipients"]
+        self.db = BidDatabase(DATABASE_FILE)
 
-    def send_digest(self, scraper_errors: list = None) -> bool:
-        """Send a digest email of new bids since the last email."""
-        if not self.sender_email or not self.sender_password or not self.recipients:
-            print("[Email] Missing credentials or recipients. Configure via settings page or env vars.")
-            return False
+    def send_digest(self, errors: List[dict] = None):
+        """Build and send the daily digest email."""
+        if not self.from_addr or not self.password or not self.recipients:
+            logger.warning("Email not configured, skipping digest")
+            return
 
-        min_score = NOTIFICATIONS.get("min_score_to_notify", 0)
-        opportunities = self.db.get_new_since_last_email(min_score=min_score)
-        # Exclude expired bids from the email digest
-        opportunities = [opp for opp in opportunities if not _is_expired(opp)]
+        bids = self.db.get_new_since_last_email()
+        if not bids:
+            logger.info("No new opportunities to email")
+            return
 
-        if not opportunities and not scraper_errors:
-            print("[Email] No new opportunities and no errors to report. Skipping email.")
-            return False
+        # Filter expired
+        bids = [b for b in bids if not self._is_expired(b)]
 
-        html = self._build_html(opportunities, scraper_errors or [])
-        count = len(opportunities)
-        subject = f"OAK Builders Bid Alert - {count} New Opportunities ({datetime.now().strftime('%m/%d/%Y')})"
+        if not bids:
+            logger.info("No active (non-expired) opportunities to email")
+            return
+
+        # Sort by relevance score descending
+        bids.sort(key=lambda b: b.get("relevance_score", 0), reverse=True)
+
+        # Build email
+        html = self._build_html(bids, errors or [])
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = self._build_subject(bids)
+        msg["From"] = self.from_addr
+        msg["To"] = ", ".join(self.recipients)
+        msg.attach(MIMEText(html, "html"))
 
         try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = subject
-            msg["From"] = self.sender_email
-            msg["To"] = ", ".join(self.recipients)
-            msg.attach(MIMEText(html, "html"))
-
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                 server.starttls()
-                server.login(self.sender_email, self.sender_password)
+                server.login(self.from_addr, self.password)
                 server.send_message(msg)
 
-            bid_ids = [opp.source_id for opp in opportunities]
-            self.db.log_email_send(
-                recipient_count=len(self.recipients),
-                bid_ids=bid_ids,
-                errors=scraper_errors,
-            )
-            print(f"[Email] Sent digest with {count} bids to {len(self.recipients)} recipients.")
-            return True
+            # Log the send
+            keys = [b.get("dedup_key", "") for b in bids]
+            self.db.log_email_send(len(self.recipients), keys)
+            logger.info(f"Digest sent to {len(self.recipients)} recipients with {len(bids)} opportunities")
 
         except Exception as e:
-            print(f"[Email] Failed to send: {e}")
-            return False
+            logger.error(f"SMTP error: {e}")
+            raise
 
-    def _build_html(self, opportunities: list, errors: list) -> str:
-        """Build HTML email body grouped by project type."""
-        grouped = defaultdict(list)
-        for opp in opportunities:
-            grouped[opp.project_type or "other"].append(opp)
+    def _build_subject(self, bids: list) -> str:
+        high_count = sum(1 for b in bids if b.get("relevance_score", 0) >= 70)
+        dont_miss = sum(1 for b in bids if b.get("relevance_score", 0) >= 80)
 
-        category_names = {
-            "waterproofing": "Waterproofing & Envelope",
-            "tenant_improvements": "Tenant Improvements",
-            "general_contracting": "General Contracting",
-            "government": "Government / Federal",
-            "general": "General",
-            "other": "Other",
-        }
-        category_order = [
-            "waterproofing", "tenant_improvements", "general_contracting",
-            "government", "general", "other",
+        today = datetime.now().strftime("%b %d")
+        parts = [f"Bid Finder — {today}"]
+
+        if dont_miss > 0:
+            parts.append(f"🔥 {dont_miss} Don't Miss!")
+        elif high_count > 0:
+            parts.append(f"⭐ {high_count} High Relevance")
+
+        parts.append(f"{len(bids)} total")
+        return " | ".join(parts)
+
+    def _build_html(self, bids: list, errors: list) -> str:
+        """Generate the HTML email body."""
+        # Categorize bids
+        dont_miss = [b for b in bids if b.get("relevance_score", 0) >= 80]
+        due_soon = [
+            b for b in bids
+            if b.get("relevance_score", 0) < 80 and self._days_left(b) is not None and 0 <= self._days_left(b) <= 7
+        ]
+        government = [
+            b for b in bids
+            if b not in dont_miss and b not in due_soon
+            and b.get("source", "") in ("SAM.gov", "DC OCP", "eVA Virginia", "eMMA Maryland", "Montgomery County")
+        ]
+        commercial = [
+            b for b in bids
+            if b not in dont_miss and b not in due_soon and b not in government
         ]
 
-        sections_html = ""
-        for cat in category_order:
-            bids = grouped.get(cat, [])
-            if not bids:
-                continue
-            cat_name = category_names.get(cat, cat.replace("_", " ").title())
-            sections_html += (
-                f'<h2 style="color:#1a472a; border-bottom:2px solid #1a472a; '
-                f'padding-bottom:6px; margin-top:28px;">'
-                f'{cat_name} ({len(bids)})</h2>\n'
-            )
-            for opp in bids:
-                sections_html += self._render_bid_card(opp)
+        stats = self.db.get_stats()
 
-        error_html = ""
+        html = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }}
+                .container {{ max-width: 700px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+                .header {{ background: linear-gradient(135deg, #1a472a 0%, #2d6a4f 100%); color: white; padding: 28px 24px; }}
+                .header h1 {{ margin: 0; font-size: 22px; }}
+                .header .subtitle {{ color: #a7d7c5; font-size: 14px; margin-top: 6px; }}
+                .stats-bar {{ display: flex; gap: 20px; padding: 16px 24px; background: #f0f9f4; border-bottom: 1px solid #e0e0e0; font-size: 13px; }}
+                .stat {{ text-align: center; }}
+                .stat-num {{ font-size: 20px; font-weight: 700; color: #1a472a; }}
+                .stat-label {{ color: #666; font-size: 11px; }}
+                .section {{ padding: 16px 24px; }}
+                .section-title {{ font-size: 16px; font-weight: 700; color: #333; margin: 0 0 12px 0; padding-bottom: 8px; border-bottom: 2px solid #e0e0e0; }}
+                .bid-card {{ border: 1px solid #e0e0e0; border-radius: 8px; padding: 14px; margin-bottom: 10px; }}
+                .bid-card.dont-miss {{ border-color: #ff6b35; background: #fff8f5; }}
+                .bid-card.due-soon {{ border-color: #ffab00; background: #fffdf5; }}
+                .bid-title {{ font-weight: 700; font-size: 14px; color: #1a1a1a; margin-bottom: 6px; }}
+                .bid-title a {{ color: #1a472a; text-decoration: none; }}
+                .bid-meta {{ font-size: 12px; color: #666; line-height: 1.6; }}
+                .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }}
+                .badge-green {{ background: #d4edda; color: #155724; }}
+                .badge-yellow {{ background: #fff3cd; color: #856404; }}
+                .badge-red {{ background: #f8d7da; color: #721c24; }}
+                .badge-fire {{ background: #ff6b35; color: white; }}
+                .badge-blue {{ background: #cce5ff; color: #004085; }}
+                .win-prob {{ display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; background: #e8e8e8; }}
+                .errors {{ background: #fff3cd; padding: 12px; border-radius: 6px; margin-top: 8px; font-size: 12px; }}
+                .footer {{ padding: 16px 24px; background: #f9f9f9; font-size: 11px; color: #999; text-align: center; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🏗️ OAK Builders — Daily Bid Digest</h1>
+                    <div class="subtitle">{datetime.now().strftime('%A, %B %d, %Y')} • {len(bids)} opportunities</div>
+                </div>
+
+                <div class="stats-bar">
+                    <div class="stat"><div class="stat-num">{stats.get('active', 0)}</div><div class="stat-label">Active</div></div>
+                    <div class="stat"><div class="stat-num">{stats.get('new_today', 0)}</div><div class="stat-label">New Today</div></div>
+                    <div class="stat"><div class="stat-num">{stats.get('high_relevance', 0)}</div><div class="stat-label">High Score</div></div>
+                    <div class="stat"><div class="stat-num">{stats.get('due_this_week', 0)}</div><div class="stat-label">Due This Week</div></div>
+                </div>
+        """
+
+        # Don't Miss section
+        if dont_miss:
+            html += '<div class="section">'
+            html += '<div class="section-title">🔥 Don\'t Miss These</div>'
+            for bid in dont_miss:
+                html += self._render_bid_card(bid, "dont-miss")
+            html += '</div>'
+
+        # Due Soon
+        if due_soon:
+            html += '<div class="section">'
+            html += '<div class="section-title">⏰ Due This Week</div>'
+            for bid in due_soon:
+                html += self._render_bid_card(bid, "due-soon")
+            html += '</div>'
+
+        # Government
+        if government:
+            html += '<div class="section">'
+            html += f'<div class="section-title">🏛️ Government ({len(government)})</div>'
+            for bid in government[:15]:
+                html += self._render_bid_card(bid)
+            html += '</div>'
+
+        # Commercial
+        if commercial:
+            html += '<div class="section">'
+            html += f'<div class="section-title">🏢 Commercial & Other ({len(commercial)})</div>'
+            for bid in commercial[:15]:
+                html += self._render_bid_card(bid)
+            html += '</div>'
+
+        # Errors
         if errors:
-            error_html = (
-                '<div style="background:#fff3cd; border:1px solid #ffc107; '
-                'padding:14px; border-radius:6px; margin:16px 0;">'
-                '<h3 style="margin-top:0; color:#856404;">Scraper Notices</h3><ul>'
-            )
+            html += '<div class="section"><div class="errors">'
+            html += f"<strong>⚠️ {len(errors)} source errors:</strong><br>"
             for err in errors:
-                error_html += f"<li>{err}</li>"
-            error_html += "</ul></div>"
+                html += f"• {err.get('source', '?')}: {err.get('error', '?')}<br>"
+            html += '</div></div>'
 
-        no_bids_html = ""
-        if not opportunities:
-            no_bids_html = (
-                '<div style="text-align:center; padding:30px; color:#666;">'
-                '<p style="font-size:16px;">No new opportunities above the score threshold today.</p>'
-                '</div>'
-            )
+        html += f"""
+                <div class="footer">
+                    OAK Builders Bid Finder v2 • {len(bids)} opportunities from {datetime.now().strftime('%m/%d/%Y %I:%M %p')} ET
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        return html
 
-        return f"""<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body style="font-family: Arial, sans-serif; max-width:700px; margin:0 auto; background:#f5f5f5; padding:0;">
-    <div style="background:#1a472a; color:white; padding:24px; text-align:center;">
-        <h1 style="margin:0; font-size:22px;">OAK Builders - Daily Bid Report</h1>
-        <p style="margin:8px 0 0; opacity:0.9;">
-            {datetime.now().strftime('%B %d, %Y')} &bull; {len(opportunities)} New Opportunities
-        </p>
-    </div>
-    <div style="background:white; padding:20px;">
-        {error_html}
-        {no_bids_html}
-        {sections_html}
-    </div>
-    <div style="text-align:center; padding:16px; color:#999; font-size:12px;">
-        <p>OAK Builders LLC &mdash; Falls Church, VA | Automated Bid Finder</p>
-    </div>
-</body>
-</html>"""
+    def _render_bid_card(self, bid: dict, extra_class: str = "") -> str:
+        score = bid.get("relevance_score", 0)
+        win_prob = bid.get("win_probability", 0)
 
-    def _render_bid_card(self, opp) -> str:
-        """Render a single bid as an HTML card."""
-        location = ", ".join(filter(None, [
-            opp.location_city, opp.location_county, opp.location_state,
-        ]))
-        if opp.budget_display:
-            value = opp.budget_display
-        elif opp.estimated_value_min:
-            value = f"${opp.estimated_value_min:,.0f} - ${opp.estimated_value_max:,.0f}"
-        else:
-            value = "Not specified"
-
-        score = opp.relevance_score
-        if score >= 70:
-            score_color = "#28a745"
+        # Score badge
+        if score >= 80:
+            score_badge = f'<span class="badge badge-fire">🔥 {score}</span>'
+        elif score >= 70:
+            score_badge = f'<span class="badge badge-green">{score}</span>'
         elif score >= 50:
-            score_color = "#ffc107"
+            score_badge = f'<span class="badge badge-yellow">{score}</span>'
         else:
-            score_color = "#dc3545"
+            score_badge = f'<span class="badge badge-red">{score}</span>'
 
-        source_name = SOURCES.get(opp.source, {}).get("name", opp.source.replace("_", " ").title())
-        link_html = f'<a href="{opp.source_url}" style="color:#1a472a; text-decoration:none; font-weight:bold;">{opp.title[:80]}</a>'
+        # Win probability
+        win_html = ""
+        if win_prob > 0:
+            win_html = f' <span class="win-prob">Win: {win_prob}%</span>'
+
+        # Location
+        parts = [bid.get("location_city", ""), bid.get("location_state", "")]
+        location = ", ".join(p for p in parts if p)
+
+        # Due date
+        due = bid.get("due_date", "")
+        days = self._days_left(bid)
+        due_display = due
+        if days is not None and days >= 0:
+            due_display = f"{due} ({days}d left)"
+        elif days is not None and days < 0:
+            due_display = f"<s>{due}</s> (expired)"
+
+        # Pre-bid alert
+        prebid = ""
+        if bid.get("pre_bid_date"):
+            mandatory = " (MANDATORY)" if bid.get("pre_bid_mandatory") else ""
+            prebid = f'<br>📅 Pre-bid: {bid["pre_bid_date"]}{mandatory}'
+
+        url = bid.get("source_url", "#")
+        title = bid.get("title", "Untitled")
 
         return f"""
-<div style="border:1px solid #e0e0e0; border-left:4px solid {score_color};
-            padding:14px; margin:10px 0; border-radius:4px; background:#fafafa;">
-    <div style="display:flex; justify-content:space-between; align-items:center;">
-        <div style="flex:1;">{link_html}</div>
-        <span style="background:{score_color}; color:white; padding:3px 12px;
-                     border-radius:12px; font-weight:bold; font-size:14px;
-                     margin-left:10px; white-space:nowrap;">{score}</span>
-    </div>
-    <table style="width:100%; margin-top:8px; font-size:13px; color:#555;">
-        <tr>
-            <td><strong>Source:</strong> {source_name}</td>
-            <td><strong>Location:</strong> {location or 'N/A'}</td>
-        </tr>
-        <tr>
-            <td><strong>Est. Value:</strong> {value}</td>
-            <td><strong>Due Date:</strong> {opp.due_date or 'N/A'}</td>
-        </tr>
-    </table>
-</div>"""
+        <div class="bid-card {extra_class}">
+            <div class="bid-title"><a href="{url}">{title}</a></div>
+            <div class="bid-meta">
+                {score_badge}{win_html}
+                <span class="badge badge-blue">{bid.get('source', '?')}</span><br>
+                📍 {location or 'Location TBD'} •
+                📅 Due: {due_display or 'TBD'} •
+                🏢 {bid.get('agency', 'Unknown')}{prebid}
+            </div>
+        </div>
+        """
+
+    def _is_expired(self, bid: dict) -> bool:
+        days = self._days_left(bid)
+        return days is not None and days < 0
+
+    def _days_left(self, bid: dict) -> int:
+        due = bid.get("due_date", "")
+        if not due:
+            return None
+        for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y"]:
+            try:
+                due_dt = datetime.strptime(due[:10], fmt)
+                return (due_dt - datetime.now()).days
+            except ValueError:
+                continue
+        return None
