@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Flask, request, jsonify, session, redirect, url_for
+from flask import Flask, request, jsonify, session, redirect, url_for, render_template_string
 
 from config import DATABASE_FILE, EMAIL, SOURCES
 from models import BidDatabase
@@ -29,7 +29,49 @@ from models import BidDatabase
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
 
-# ─── Auth ──────────────────────────────────────────────────────────
+# ─── Settings and Auth ──────────────────────────────────────────────────────
+SETTINGS_FILE = "settings.json"
+
+
+def load_settings():
+    """Load settings from JSON file and set as environment variables."""
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                settings = json.load(f)
+
+            # Set credentials as environment variables
+            if "sam_gov_api_key" in settings:
+                os.environ["SAM_GOV_API_KEY"] = settings["sam_gov_api_key"]
+            if "planhub_email" in settings:
+                os.environ["PLANHUB_EMAIL"] = settings["planhub_email"]
+            if "planhub_password" in settings:
+                os.environ["PLANHUB_PASSWORD"] = settings["planhub_password"]
+            if "bidnet_email" in settings:
+                os.environ["BIDNET_EMAIL"] = settings["bidnet_email"]
+            if "bidnet_password" in settings:
+                os.environ["BIDNET_PASSWORD"] = settings["bidnet_password"]
+            if "opengov_email" in settings:
+                os.environ["OPENGOV_EMAIL"] = settings["opengov_email"]
+            if "opengov_password" in settings:
+                os.environ["OPENGOV_PASSWORD"] = settings["opengov_password"]
+            if "gmail_address" in settings:
+                os.environ["GMAIL_ADDRESS"] = settings["gmail_address"]
+            if "gmail_app_password" in settings:
+                os.environ["GMAIL_APP_PASSWORD"] = settings["gmail_app_password"]
+            if "email_recipients" in settings:
+                os.environ["EMAIL_RECIPIENTS"] = settings["email_recipients"]
+            if "app_password" in settings:
+                os.environ["APP_PASSWORD"] = settings["app_password"]
+            if "api_trigger_key" in settings:
+                os.environ["API_TRIGGER_KEY"] = settings["api_trigger_key"]
+        except Exception as e:
+            print(f"Error loading settings: {e}")
+
+
+# Load settings on startup
+load_settings()
+
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 API_TRIGGER_KEY = os.environ.get("API_TRIGGER_KEY", "")
 
@@ -73,6 +115,62 @@ def set_scan_state(state):
     os.replace(tmp, SCAN_STATE_FILE)
 
 
+# ─── Settings helpers ────────────────────────────────────────────────────
+def get_settings():
+    """Read current settings from file."""
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_settings(settings):
+    """Save settings to file."""
+    tmp = SETTINGS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(settings, f, indent=2)
+    os.replace(tmp, SETTINGS_FILE)
+
+
+def mask_value(value, show_chars=4):
+    """Mask a value, showing only the last N characters."""
+    if not value:
+        return ""
+    if len(value) <= show_chars:
+        return value
+    return "*" * (len(value) - show_chars) + value[-show_chars:]
+
+
+def get_source_status():
+    """Get enabled/disabled status and auth config for all sources."""
+    settings = get_settings()
+    source_config = settings.get("sources", {})
+
+    status = []
+    for source in SOURCES:
+        source_name = source.get("name", "Unknown")
+        enabled = source_config.get(source_name, {}).get("enabled", True)
+
+        # Check if required credentials are configured
+        required_creds = source.get("required_credentials", [])
+        has_auth = all(
+            settings.get(cred.lower().replace("_", "_"))
+            for cred in required_creds
+        ) if required_creds else True
+
+        status.append({
+            "name": source_name,
+            "enabled": enabled,
+            "has_auth": has_auth,
+            "required_credentials": required_creds,
+        })
+
+    return status
+
+
 # ─── Routes ────────────────────────────────────────────────────────
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -88,6 +186,96 @@ def login():
 @login_required
 def dashboard():
     return DASHBOARD_HTML
+
+
+@app.route("/settings", methods=["GET", "POST"])
+@login_required
+def settings():
+    if request.method == "POST":
+        settings_data = get_settings()
+
+        # Update credentials
+        if request.form.get("sam_gov_api_key"):
+            settings_data["sam_gov_api_key"] = request.form.get("sam_gov_api_key")
+        if request.form.get("planhub_email"):
+            settings_data["planhub_email"] = request.form.get("planhub_email")
+        if request.form.get("planhub_password"):
+            settings_data["planhub_password"] = request.form.get("planhub_password")
+        if request.form.get("bidnet_email"):
+            settings_data["bidnet_email"] = request.form.get("bidnet_email")
+        if request.form.get("bidnet_password"):
+            settings_data["bidnet_password"] = request.form.get("bidnet_password")
+        if request.form.get("opengov_email"):
+            settings_data["opengov_email"] = request.form.get("opengov_email")
+        if request.form.get("opengov_password"):
+            settings_data["opengov_password"] = request.form.get("opengov_password")
+        if request.form.get("gmail_address"):
+            settings_data["gmail_address"] = request.form.get("gmail_address")
+        if request.form.get("gmail_app_password"):
+            settings_data["gmail_app_password"] = request.form.get("gmail_app_password")
+        if request.form.get("email_recipients"):
+            settings_data["email_recipients"] = request.form.get("email_recipients")
+        if request.form.get("app_password"):
+            settings_data["app_password"] = request.form.get("app_password")
+        if request.form.get("api_trigger_key"):
+            settings_data["api_trigger_key"] = request.form.get("api_trigger_key")
+
+        # Update source configurations
+        if "sources" not in settings_data:
+            settings_data["sources"] = {}
+
+        for source in SOURCES:
+            source_name = source.get("name", "Unknown")
+            enabled = request.form.get(f"source_{source_name}_enabled") == "on"
+            if source_name not in settings_data["sources"]:
+                settings_data["sources"][source_name] = {}
+            settings_data["sources"][source_name]["enabled"] = enabled
+
+        save_settings(settings_data)
+        load_settings()  # Reload settings as environment variables
+
+        return redirect(url_for("settings"))
+
+    # GET: show form with current values
+    current_settings = get_settings()
+    source_status = get_source_status()
+
+    return render_template_string(SETTINGS_HTML,
+                                 current_settings=current_settings,
+                                 source_status=source_status,
+                                 mask_value=mask_value)
+
+
+@app.route("/api/settings", methods=["GET"])
+@login_required
+def api_settings():
+    """Return which settings are configured (not the actual values)."""
+    current_settings = get_settings()
+
+    status = {
+        "sam_gov_api_key": bool(current_settings.get("sam_gov_api_key")),
+        "planhub_email": bool(current_settings.get("planhub_email")),
+        "planhub_password": bool(current_settings.get("planhub_password")),
+        "bidnet_email": bool(current_settings.get("bidnet_email")),
+        "bidnet_password": bool(current_settings.get("bidnet_password")),
+        "opengov_email": bool(current_settings.get("opengov_email")),
+        "opengov_password": bool(current_settings.get("opengov_password")),
+        "gmail_address": bool(current_settings.get("gmail_address")),
+        "gmail_app_password": bool(current_settings.get("gmail_app_password")),
+        "email_recipients": bool(current_settings.get("email_recipients")),
+        "app_password": bool(current_settings.get("app_password")),
+        "api_trigger_key": bool(current_settings.get("api_trigger_key")),
+    }
+
+    return jsonify(status)
+
+
+@app.route("/api/sources", methods=["GET"])
+@login_required
+def api_sources():
+    """Return list of sources with enabled status and auth configuration."""
+    source_status = get_source_status()
+    return jsonify(source_status)
 
 
 @app.route("/api/stats")
@@ -295,6 +483,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <button onclick="startScan()">Scan Now</button>
     <button onclick="exportCSV()">Export CSV</button>
     <button onclick="sendEmail()">Email Digest</button>
+    <button onclick="window.location='/settings'">Settings</button>
   </div>
 </div>
 
@@ -475,7 +664,194 @@ fetch('/api/scan-status').then(r=>r.json()).then(s=>{if(s.running)pollScan()});
 </html>"""
 
 
-# ─── PWA manifest ──────────────────────────────────────────────────
+# ─── Settings HTML ────────────────────────────────────────────────
+SETTINGS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings — Bid Finder</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a1a}
+.top-bar{background:linear-gradient(135deg,#1a472a,#2d6a4f);color:#fff;padding:16px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.top-bar h1{font-size:20px;font-weight:700}
+.back-btn{background:rgba(255,255,255,.2);color:#fff;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px}
+.back-btn:hover{background:rgba(255,255,255,.3)}
+.container{max-width:800px;margin:24px auto;padding:0 16px}
+.section{background:#fff;border-radius:10px;padding:24px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.section h2{font-size:16px;font-weight:700;color:#1a472a;margin-bottom:16px;border-bottom:2px solid #e8e8e8;padding-bottom:12px}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:13px;font-weight:600;color:#333;margin-bottom:6px}
+.form-group input{width:100%;padding:10px;border:1px solid #d0d0d0;border-radius:6px;font-size:13px;font-family:monospace}
+.form-group input:focus{outline:none;border-color:#2d6a4f;box-shadow:0 0 0 3px rgba(45,106,79,.1)}
+.form-group textarea{width:100%;padding:10px;border:1px solid #d0d0d0;border-radius:6px;font-size:13px;font-family:monospace;min-height:80px}
+.form-group .hint{font-size:11px;color:#888;margin-top:4px}
+.source-list{display:grid;gap:12px}
+.source-item{border:1px solid #e0e0e0;border-radius:6px;padding:12px;display:flex;align-items:center;gap:12px}
+.source-item input[type="checkbox"]{width:20px;height:20px;cursor:pointer;accent-color:#2d6a4f}
+.source-info{flex:1}
+.source-info .name{font-weight:600;color:#1a472a;font-size:13px}
+.source-info .status{font-size:11px;color:#888;margin-top:2px}
+.status-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;margin-left:4px}
+.status-badge.enabled{background:#d4edda;color:#155724}
+.status-badge.disabled{background:#f8d7da;color:#721c24}
+.status-badge.auth-ok{background:#cce5ff;color:#004085}
+.status-badge.auth-missing{background:#fff3cd;color:#856404}
+.buttons{display:flex;gap:10px;justify-content:flex-end;margin-top:24px}
+.btn{padding:10px 20px;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}
+.btn-primary{background:#2d6a4f;color:#fff}
+.btn-primary:hover{background:#1a472a}
+.btn-secondary{background:#e0e0e0;color:#333}
+.btn-secondary:hover{background:#d0d0d0}
+.footer{text-align:center;padding:20px;font-size:11px;color:#aaa}
+</style>
+</head>
+<body>
+<div class="top-bar">
+  <h1>Settings</h1>
+  <button class="back-btn" onclick="window.location='/'">Back to Dashboard</button>
+</div>
+
+<div class="container">
+  <form method="POST">
+    <!-- Credentials Section -->
+    <div class="section">
+      <h2>API Credentials</h2>
+
+      <div class="form-group">
+        <label for="sam_gov_api_key">SAM.gov API Key</label>
+        <input type="password" id="sam_gov_api_key" name="sam_gov_api_key" value="{{ current_settings.get('sam_gov_api_key', '') }}" placeholder="Enter SAM.gov API Key">
+        <div class="hint">Your API key for accessing SAM.gov bid opportunities</div>
+      </div>
+    </div>
+
+    <!-- PlanHub Section -->
+    <div class="section">
+      <h2>PlanHub Credentials</h2>
+
+      <div class="form-group">
+        <label for="planhub_email">Email</label>
+        <input type="email" id="planhub_email" name="planhub_email" value="{{ current_settings.get('planhub_email', '') }}" placeholder="your@email.com">
+      </div>
+
+      <div class="form-group">
+        <label for="planhub_password">Password</label>
+        <input type="password" id="planhub_password" name="planhub_password" value="{{ current_settings.get('planhub_password', '') }}" placeholder="Enter password">
+        <div class="hint">{% if current_settings.get('planhub_password') %}Currently set (showing last 4 chars: {{ mask_value(current_settings.get('planhub_password')) }}){% endif %}</div>
+      </div>
+    </div>
+
+    <!-- BidNet Section -->
+    <div class="section">
+      <h2>BidNet Credentials</h2>
+
+      <div class="form-group">
+        <label for="bidnet_email">Email</label>
+        <input type="email" id="bidnet_email" name="bidnet_email" value="{{ current_settings.get('bidnet_email', '') }}" placeholder="your@email.com">
+      </div>
+
+      <div class="form-group">
+        <label for="bidnet_password">Password</label>
+        <input type="password" id="bidnet_password" name="bidnet_password" value="{{ current_settings.get('bidnet_password', '') }}" placeholder="Enter password">
+        <div class="hint">{% if current_settings.get('bidnet_password') %}Currently set (showing last 4 chars: {{ mask_value(current_settings.get('bidnet_password')) }}){% endif %}</div>
+      </div>
+    </div>
+
+    <!-- OpenGov Section -->
+    <div class="section">
+      <h2>OpenGov Credentials</h2>
+
+      <div class="form-group">
+        <label for="opengov_email">Email</label>
+        <input type="email" id="opengov_email" name="opengov_email" value="{{ current_settings.get('opengov_email', '') }}" placeholder="your@email.com">
+      </div>
+
+      <div class="form-group">
+        <label for="opengov_password">Password</label>
+        <input type="password" id="opengov_password" name="opengov_password" value="{{ current_settings.get('opengov_password', '') }}" placeholder="Enter password">
+        <div class="hint">{% if current_settings.get('opengov_password') %}Currently set (showing last 4 chars: {{ mask_value(current_settings.get('opengov_password')) }}){% endif %}</div>
+      </div>
+    </div>
+
+    <!-- Gmail Section -->
+    <div class="section">
+      <h2>Gmail Configuration</h2>
+
+      <div class="form-group">
+        <label for="gmail_address">Gmail Address</label>
+        <input type="email" id="gmail_address" name="gmail_address" value="{{ current_settings.get('gmail_address', '') }}" placeholder="your-email@gmail.com">
+        <div class="hint">The Gmail account to use for sending email digests</div>
+      </div>
+
+      <div class="form-group">
+        <label for="gmail_app_password">Gmail App Password</label>
+        <input type="password" id="gmail_app_password" name="gmail_app_password" value="{{ current_settings.get('gmail_app_password', '') }}" placeholder="xxxx xxxx xxxx xxxx">
+        <div class="hint">Generate this at https://myaccount.google.com/apppasswords (requires 2FA enabled)</div>
+      </div>
+
+      <div class="form-group">
+        <label for="email_recipients">Email Recipients</label>
+        <textarea id="email_recipients" name="email_recipients" placeholder="one@example.com&#10;two@example.com&#10;three@example.com">{{ current_settings.get('email_recipients', '') }}</textarea>
+        <div class="hint">One email address per line</div>
+      </div>
+    </div>
+
+    <!-- Dashboard Security Section -->
+    <div class="section">
+      <h2>Dashboard Security</h2>
+
+      <div class="form-group">
+        <label for="app_password">Dashboard Password</label>
+        <input type="password" id="app_password" name="app_password" value="{{ current_settings.get('app_password', '') }}" placeholder="Enter password">
+        <div class="hint">Leave empty to disable password protection. Change this to your desired password.</div>
+      </div>
+
+      <div class="form-group">
+        <label for="api_trigger_key">API Trigger Key</label>
+        <input type="password" id="api_trigger_key" name="api_trigger_key" value="{{ current_settings.get('api_trigger_key', '') }}" placeholder="Enter API key">
+        <div class="hint">Use as X-API-Key header to trigger scans via API without authentication</div>
+      </div>
+    </div>
+
+    <!-- Sources Section -->
+    <div class="section">
+      <h2>Source Status</h2>
+      <div class="source-list">
+        {% for source in source_status %}
+        <div class="source-item">
+          <input type="checkbox" id="source_{{ source.name }}_enabled" name="source_{{ source.name }}_enabled" {% if source.enabled %}checked{% endif %}>
+          <div class="source-info">
+            <div class="name">
+              {{ source.name }}
+              <span class="status-badge {% if source.enabled %}enabled{% else %}disabled{% endif %}">
+                {% if source.enabled %}Enabled{% else %}Disabled{% endif %}
+              </span>
+              <span class="status-badge {% if source.has_auth %}auth-ok{% else %}auth-missing{% endif %}">
+                {% if source.has_auth %}Auth OK{% else %}Auth Missing{% endif %}
+              </span>
+            </div>
+            <div class="status">{{ source.required_credentials|join(', ') if source.required_credentials else 'No credentials required' }}</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- Buttons -->
+    <div class="buttons">
+      <button type="button" class="btn btn-secondary" onclick="window.location='/'">Cancel</button>
+      <button type="submit" class="btn btn-primary">Save Settings</button>
+    </div>
+  </form>
+</div>
+
+<div class="footer">Settings are stored locally in settings.json</div>
+</body>
+</html>"""
+
+
+# ─── PWA manifest ──────────────────────────────────────────────
 @app.route("/manifest.json")
 def manifest():
     return jsonify({

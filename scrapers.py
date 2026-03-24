@@ -3,15 +3,16 @@ OAK BUILDERS LLC - Bid Finder v2
 Web Scrapers — expanded source coverage
 
 Changes from v1:
-- SAM.gov: queries ALL NAICS codes (primary + secondary), 45-day lookback
+- SAM.gov: queries ALL NAICS codes (primary + secondary), 90-day lookback, pagination
 - SAM.gov: extracts set-aside, contact info, pre-bid dates from full notices
-- PlanHub: NEW scraper for commercial plan room leads
+- PlanHub: NEW scraper for commercial plan room leads, with auth support
 - eMMA Maryland: NEW scraper for Maryland state procurement
-- DC OCP: improved to extract more metadata
+- DC OCP: improved to extract more metadata, broadened filtering
 - County scraper: smarter fallback strategies, better date parsing
 - All scrapers: extract bonding requirements when available
 - All scrapers: better error messages for debugging
 - Added RSS/Atom feed scraper for agencies that publish feeds
+- NEW: VdotScraper (Virginia DOT), BonfireScraper, PrinceWilliamScraper
 """
 
 import hashlib
@@ -166,6 +167,10 @@ class BaseScraper(ABC):
             "plumbing", "electrical", "hvac", "demolition",
             "masonry", "concrete", "paving", "fencing",
             "waterproofing", "painting", "flooring",
+            "maintenance", "facility", "facilities", "improvement",
+            "upgrade", "rehabilitation", "restoration", "modification",
+            "alteration", "abatement", "remediation", "weatherization",
+            "infrastructure", "utilities", "commissioning",
         ]
         return any(ind in text_lower for ind in construction_indicators)
 
@@ -174,7 +179,7 @@ class BaseScraper(ABC):
 class SamGovScraper(BaseScraper):
     """
     Federal opportunities via SAM.gov API v2.
-    Now queries all NAICS codes with 45-day lookback.
+    Queries all NAICS codes with 90-day lookback and pagination.
     """
 
     API_BASE = "https://api.sam.gov/opportunities/v2/search"
@@ -187,33 +192,42 @@ class SamGovScraper(BaseScraper):
 
         all_results = []
         naics_codes = [COMPANY["primary_naics"]] + COMPANY["secondary_naics"]
-        posted_from = (datetime.now() - timedelta(days=45)).strftime("%m/%d/%Y")
+        posted_from = (datetime.now() - timedelta(days=90)).strftime("%m/%d/%Y")
         posted_to = datetime.now().strftime("%m/%d/%Y")
 
         for naics in naics_codes:
             try:
-                params = {
-                    "api_key": api_key,
-                    "postedFrom": posted_from,
-                    "postedTo": posted_to,
-                    "ncode": naics,
-                    "ptype": "o,k",  # Opportunities + combined
-                    "limit": 100,
-                    "offset": 0,
-                }
-
                 # Search for DC/VA/MD
                 for state in ["VA", "DC", "MD"]:
-                    params["state"] = state
-                    data = self._fetch_json(self.API_BASE, params)
-                    opps = data.get("opportunitiesData", [])
+                    offset = 0
+                    while True:
+                        params = {
+                            "api_key": api_key,
+                            "postedFrom": posted_from,
+                            "postedTo": posted_to,
+                            "ncode": naics,
+                            "ptype": "o,k",  # Opportunities + combined
+                            "limit": 100,
+                            "offset": offset,
+                            "state": state,
+                        }
 
-                    for opp in opps:
-                        bid = self._parse_opportunity(opp)
-                        if bid:
-                            all_results.append(bid)
+                        data = self._fetch_json(self.API_BASE, params)
+                        opps = data.get("opportunitiesData", [])
 
-                    time.sleep(0.5)  # Rate limit
+                        if not opps:
+                            break
+
+                        for opp in opps:
+                            bid = self._parse_opportunity(opp)
+                            if bid:
+                                all_results.append(bid)
+
+                        if len(opps) < 100:
+                            break
+
+                        offset += 100
+                        time.sleep(0.5)  # Rate limit
 
             except Exception as e:
                 logger.warning(f"SAM.gov NAICS {naics} error: {e}")
@@ -299,19 +313,31 @@ class DcOcpScraper(BaseScraper):
     def scrape(self) -> List[BidOpportunity]:
         results = []
         try:
-            params = {
-                "where": "STATUS='Open' AND (CATEGORY LIKE '%Construction%' OR CATEGORY LIKE '%Building%' OR CATEGORY LIKE '%Renovation%')",
-                "outFields": "*",
-                "f": "json",
-                "resultRecordCount": 200,
-            }
-            data = self._fetch_json(self.API_URL, params)
+            offset = 0
+            while True:
+                params = {
+                    "where": "STATUS='Open'",
+                    "outFields": "*",
+                    "f": "json",
+                    "resultOffset": offset,
+                    "resultRecordCount": 200,
+                }
+                data = self._fetch_json(self.API_URL, params)
+                features = data.get("features", [])
 
-            for feature in data.get("features", []):
-                attr = feature.get("attributes", {})
-                bid = self._parse_feature(attr)
-                if bid:
-                    results.append(bid)
+                if not features:
+                    break
+
+                for feature in features:
+                    attr = feature.get("attributes", {})
+                    bid = self._parse_feature(attr)
+                    if bid:
+                        results.append(bid)
+
+                if len(features) < 200:
+                    break
+
+                offset += 200
 
         except Exception as e:
             logger.error(f"DC OCP error: {e}")
@@ -378,17 +404,27 @@ class MontgomeryCountyScraper(BaseScraper):
     def scrape(self) -> List[BidOpportunity]:
         results = []
         try:
-            params = {
-                "$where": "status='Active' OR status='Open'",
-                "$limit": 200,
-                "$order": "posting_date DESC",
-            }
-            data = self._fetch_json(self.API_URL, params)
+            offset = 0
+            while True:
+                params = {
+                    "$limit": 200,
+                    "$order": "posting_date DESC",
+                    "$offset": offset,
+                }
+                data = self._fetch_json(self.API_URL, params)
 
-            for item in data:
-                bid = self._parse_item(item)
-                if bid:
-                    results.append(bid)
+                if not data:
+                    break
+
+                for item in data:
+                    bid = self._parse_item(item)
+                    if bid:
+                        results.append(bid)
+
+                if len(data) < 200:
+                    break
+
+                offset += 200
 
         except Exception as e:
             logger.error(f"Montgomery County error: {e}")
@@ -439,7 +475,7 @@ class EvaScraper(BaseScraper):
             sol_links = [
                 l for l in links
                 if any(term in (l.text or "").lower()
-                       for term in ["solicitation", "bid", "rfp", "ifb", "construction"])
+                       for term in ["solicitation", "bid", "rfp", "ifb"])
             ]
 
             if not sol_links:
@@ -451,7 +487,7 @@ class EvaScraper(BaseScraper):
                 if soup:
                     sol_links = soup.find_all("a", href=True)
 
-            for link in sol_links[:50]:
+            for link in sol_links[:200]:
                 bid = self._parse_listing(link, soup)
                 if bid:
                     results.append(bid)
@@ -497,29 +533,44 @@ class EvaScraper(BaseScraper):
         )
 
 
-# ─── eMMA Maryland (NEW) ────────────────────────────────────────────
+# ─── eMMA Maryland ──────────────────────────────────────────────────
 class EmmaScraper(BaseScraper):
     """Maryland eMMA procurement portal."""
 
-    BASE_URL = "https://emma.maryland.gov"
+    BASE_URL = "https://procurement.maryland.gov"
 
     def scrape(self) -> List[BidOpportunity]:
         results = []
         try:
-            search_url = f"{self.BASE_URL}/page.aspx/en/bpm/process_manage_main"
+            search_url = f"{self.BASE_URL}/page"
             soup = self._fetch_html(search_url)
 
-            # Look for open solicitations
             # eMMA typically renders via JS, so try browser fallback
             if not soup.find_all("table"):
                 soup = self._browser_fetch(search_url, wait_for="table")
 
             if soup:
                 rows = soup.find_all("tr")
-                for row in rows[1:50]:  # Skip header
+                for row in rows[1:200]:  # Skip header, increased limit
                     bid = self._parse_row(row)
                     if bid:
                         results.append(bid)
+
+            # Alternative: try public browse page
+            if not results:
+                alt_url = "https://emma.maryland.gov/page.aspx/en/rfp/request_browse_public"
+                try:
+                    soup = self._fetch_html(alt_url)
+                    if not soup.find_all("table"):
+                        soup = self._browser_fetch(alt_url, wait_for="table")
+                    if soup:
+                        rows = soup.find_all("tr")
+                        for row in rows[1:200]:
+                            bid = self._parse_row(row)
+                            if bid:
+                                results.append(bid)
+                except Exception as e:
+                    logger.warning(f"eMMA alternative URL failed: {e}")
 
         except Exception as e:
             logger.error(f"eMMA Maryland error: {e}")
@@ -549,7 +600,7 @@ class EmmaScraper(BaseScraper):
         )
 
 
-# ─── PlanHub (NEW) ──────────────────────────────────────────────────
+# ─── PlanHub ────────────────────────────────────────────────────────
 class PlanHubScraper(BaseScraper):
     """
     PlanHub commercial plan room scraper.
@@ -561,9 +612,28 @@ class PlanHubScraper(BaseScraper):
 
     def scrape(self) -> List[BidOpportunity]:
         results = []
+
+        # Check for credentials
+        email = os.environ.get("PLANHUB_EMAIL", "")
+        password = os.environ.get("PLANHUB_PASSWORD", "")
+
+        if email and password:
+            # Try authenticated access
+            try:
+                login_url = f"{self.BASE_URL}/account/login"
+                self.session.post(login_url, data={
+                    "email": email,
+                    "password": password,
+                }, timeout=REQUEST_TIMEOUT)
+                logger.info("PlanHub login successful")
+            except Exception as e:
+                logger.warning(f"PlanHub login failed: {e}")
+        else:
+            logger.info("PlanHub credentials not set, using public search")
+
         try:
-            # PlanHub has a public project search
-            search_url = f"{self.BASE_URL}/projects"
+            # Search with DC metro area parameter
+            search_url = f"{self.BASE_URL}/projects?q=DC%20metro&location=Washington%20DC"
 
             # PlanHub is heavily JS-rendered, need browser
             soup = self._browser_fetch(search_url, wait_for=".project-card")
@@ -579,9 +649,9 @@ class PlanHubScraper(BaseScraper):
                     cards = soup.find_all("article")
                 if not cards:
                     # Try table rows
-                    cards = soup.find_all("tr")[1:50]
+                    cards = soup.find_all("tr")[1:200]
 
-                for card in cards[:100]:
+                for card in cards[:200]:
                     bid = self._parse_card(card)
                     if bid:
                         results.append(bid)
@@ -658,60 +728,91 @@ class CountyScraper(BaseScraper):
         self.base_url = self.config.get("url", "")
         self.source_name = self.config.get("name", source_key)
 
+        # URL overrides for specific counties
+        self.url_overrides = {
+            "fairfax": [
+                self.base_url,
+                "https://fairfaxcounty.bonfirehub.com/portal/?tab=openOpportunities",
+            ],
+            "arlington": [
+                self.base_url,
+                "https://vrapp.vendorregistry.com/Bids/View/BidsList",
+            ],
+        }
+
     def scrape(self) -> List[BidOpportunity]:
         results = []
-        try:
-            soup = self._fetch_html(self.base_url)
 
-            # Strategy 1: Look for tables
-            tables = soup.find_all("table")
-            for table in tables:
-                rows = table.find_all("tr")
-                for row in rows[1:]:
-                    bid = self._parse_table_row(row)
-                    if bid:
-                        results.append(bid)
+        # Determine which URLs to try
+        urls_to_try = [self.base_url]
+        source_lower = self.source_key.lower()
+        for key, alt_urls in self.url_overrides.items():
+            if key in source_lower:
+                urls_to_try = alt_urls
+                break
 
-            # Strategy 2: Look for listing divs/articles
-            if not results:
-                listings = soup.find_all(
-                    class_=re.compile(r"bid|solicitation|procurement|listing|opportunity")
-                )
-                for listing in listings:
-                    bid = self._parse_listing_div(listing)
-                    if bid:
-                        results.append(bid)
+        for url in urls_to_try:
+            if not url:
+                continue
 
-            # Strategy 3: Look for links with bid-related text
-            if not results:
-                links = soup.find_all("a", href=True)
-                for link in links:
-                    text = self._clean_text(link.text)
-                    if self._is_construction_related(text):
-                        results.append(BidOpportunity(
-                            title=text,
-                            source=self.source_name,
-                            source_url=urljoin(self.base_url, link["href"]),
-                            location_state=self._guess_state(),
-                            agency=self.source_name,
-                            keyword_matches=self._extract_keywords(text),
-                        ))
+            try:
+                soup = self._fetch_html(url)
 
-            # Strategy 4: Browser fallback for JS-rendered sites
-            if not results:
-                soup = self._browser_fetch(self.base_url, wait_for="table")
-                if soup:
-                    tables = soup.find_all("table")
-                    for table in tables:
-                        rows = table.find_all("tr")
-                        for row in rows[1:]:
-                            bid = self._parse_table_row(row)
-                            if bid:
-                                results.append(bid)
+                # Strategy 1: Look for tables
+                tables = soup.find_all("table")
+                for table in tables:
+                    rows = table.find_all("tr")
+                    for row in rows[1:]:
+                        bid = self._parse_table_row(row)
+                        if bid:
+                            results.append(bid)
 
-        except Exception as e:
-            logger.error(f"{self.source_name} error: {e}")
-            raise
+                # Strategy 2: Look for listing divs/articles
+                if not results:
+                    listings = soup.find_all(
+                        class_=re.compile(r"bid|solicitation|procurement|listing|opportunity")
+                    )
+                    for listing in listings:
+                        bid = self._parse_listing_div(listing)
+                        if bid:
+                            results.append(bid)
+
+                # Strategy 3: Look for links with bid-related text
+                if not results:
+                    links = soup.find_all("a", href=True)
+                    for link in links:
+                        text = self._clean_text(link.text)
+                        if self._is_construction_related(text):
+                            results.append(BidOpportunity(
+                                title=text,
+                                source=self.source_name,
+                                source_url=urljoin(url, link["href"]),
+                                location_state=self._guess_state(),
+                                agency=self.source_name,
+                                keyword_matches=self._extract_keywords(text),
+                            ))
+
+                # Strategy 4: Browser fallback for JS-rendered sites
+                if not results:
+                    soup = self._browser_fetch(url, wait_for="table")
+                    if soup:
+                        tables = soup.find_all("table")
+                        for table in tables:
+                            rows = table.find_all("tr")
+                            for row in rows[1:]:
+                                bid = self._parse_table_row(row)
+                                if bid:
+                                    results.append(bid)
+
+                if results:
+                    break  # Stop if we found results
+
+            except Exception as e:
+                logger.warning(f"{self.source_name} ({url}) error: {e}")
+                continue
+
+        if not results:
+            logger.error(f"{self.source_name} returned no results from any URL")
 
         return results
 
@@ -806,8 +907,8 @@ class BidNetScraper(BaseScraper):
                 "password": password,
             }, timeout=REQUEST_TIMEOUT)
 
-            # Search for construction bids in our area
-            search_url = f"{self.BASE_URL}/bids"
+            # Search for construction bids with location parameters
+            search_url = f"{self.BASE_URL}/bids?location=Virginia,Washington+DC,Maryland&category=construction"
             soup = self._fetch_html(search_url)
 
             rows = soup.find_all("tr")
@@ -869,6 +970,8 @@ class OpenGovScraper(BaseScraper):
                 "https://procurement.opengov.com/portal/arlington-county",
                 "https://procurement.opengov.com/portal/fairfax-county",
                 "https://procurement.opengov.com/portal/loudoun-county-va",
+                "https://procurement.opengov.com/portal/prince-william-county-va",
+                "https://procurement.opengov.com/portal/city-of-alexandria-va",
             ]
 
             for portal_url in embed_urls:
@@ -916,6 +1019,10 @@ class OpenGovScraper(BaseScraper):
             agency = "Fairfax County"
         elif "loudoun" in base_url:
             agency = "Loudoun County"
+        elif "prince-william" in base_url:
+            agency = "Prince William County"
+        elif "alexandria" in base_url:
+            agency = "City of Alexandria"
 
         return BidOpportunity(
             title=title,
@@ -925,6 +1032,157 @@ class OpenGovScraper(BaseScraper):
             agency=agency,
             keyword_matches=self._extract_keywords(title),
         )
+
+
+# ─── VDOT Virginia ──────────────────────────────────────────────────
+class VdotScraper(BaseScraper):
+    """Virginia DOT — transportation/civil projects."""
+
+    BASE_URL = "https://cabb.virginiadot.org"
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+        try:
+            soup = self._fetch_html(self.BASE_URL)
+            # Look for advertisement tables
+            if not soup.find("table"):
+                soup = self._browser_fetch(self.BASE_URL, wait_for="table")
+            if soup:
+                for table in soup.find_all("table"):
+                    for row in table.find_all("tr")[1:]:
+                        bid = self._parse_row(row)
+                        if bid:
+                            results.append(bid)
+        except Exception as e:
+            logger.error(f"VDOT error: {e}")
+            raise
+        return results
+
+    def _parse_row(self, row) -> Optional[BidOpportunity]:
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            return None
+        title = self._clean_text(cells[0].text)
+        if not title or len(title) < 5:
+            return None
+        link = row.find("a", href=True)
+        url = urljoin(self.BASE_URL, link["href"]) if link else ""
+        due_date = ""
+        for cell in reversed(cells):
+            text = self._clean_text(cell.text)
+            if re.search(r'\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2}', text):
+                due_date = text
+                break
+        return BidOpportunity(
+            title=title,
+            source="VDOT",
+            source_url=url,
+            location_state="VA",
+            due_date=due_date,
+            agency="Virginia DOT",
+            project_type="civil_infrastructure",
+            keyword_matches=self._extract_keywords(title),
+        )
+
+
+# ─── Bonfire Procurement ────────────────────────────────────────────
+class BonfireScraper(BaseScraper):
+    """Bonfire procurement portals — used by Fairfax County and others."""
+
+    PORTALS = {
+        "fairfax": {
+            "url": "https://fairfaxcounty.bonfirehub.com/portal/?tab=openOpportunities",
+            "name": "Fairfax County (Bonfire)",
+            "state": "VA",
+        },
+    }
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+        for key, portal in self.PORTALS.items():
+            try:
+                soup = self._browser_fetch(portal["url"], wait_for="table")
+                if not soup:
+                    soup = self._fetch_html(portal["url"])
+                if soup:
+                    for row in soup.find_all("tr")[1:]:
+                        bid = self._parse_row(row, portal)
+                        if bid:
+                            results.append(bid)
+                time.sleep(1)
+            except Exception as e:
+                logger.warning(f"Bonfire {key} error: {e}")
+        return results
+
+    def _parse_row(self, row, portal) -> Optional[BidOpportunity]:
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            return None
+        title = self._clean_text(cells[0].text)
+        if not title or len(title) < 5:
+            return None
+        link = row.find("a", href=True)
+        url = urljoin(portal["url"], link["href"]) if link else ""
+        due_date = ""
+        for cell in reversed(cells):
+            text = self._clean_text(cell.text)
+            if re.search(r'\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2}', text):
+                due_date = text
+                break
+        return BidOpportunity(
+            title=title,
+            source=portal["name"],
+            source_url=url,
+            location_state=portal["state"],
+            due_date=due_date,
+            agency=portal["name"],
+            keyword_matches=self._extract_keywords(title),
+        )
+
+
+# ─── Prince William County ──────────────────────────────────────────
+class PrinceWilliamScraper(BaseScraper):
+    """Prince William County procurement."""
+
+    BASE_URL = "https://eservice2.pwcgov.org/eservices/procurement/"
+
+    def scrape(self) -> List[BidOpportunity]:
+        results = []
+        try:
+            soup = self._fetch_html(self.BASE_URL)
+            if not soup.find("table"):
+                soup = self._browser_fetch(self.BASE_URL, wait_for="table")
+            if soup:
+                for table in soup.find_all("table"):
+                    for row in table.find_all("tr")[1:]:
+                        cells = row.find_all("td")
+                        if len(cells) < 2:
+                            continue
+                        title = self._clean_text(cells[0].text)
+                        if not title or len(title) < 5:
+                            continue
+                        link = row.find("a", href=True)
+                        url = urljoin(self.BASE_URL, link["href"]) if link else ""
+                        due_date = ""
+                        for cell in reversed(cells):
+                            text = self._clean_text(cell.text)
+                            if re.search(r'\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2}', text):
+                                due_date = text
+                                break
+                        results.append(BidOpportunity(
+                            title=title,
+                            source="Prince William County",
+                            source_url=url,
+                            location_state="VA",
+                            location_county="Prince William County",
+                            due_date=due_date,
+                            agency="Prince William County",
+                            keyword_matches=self._extract_keywords(title),
+                        ))
+        except Exception as e:
+            logger.error(f"Prince William County error: {e}")
+            raise
+        return results
 
 
 # ─── Permit Scraper (Lead Gen) ──────────────────────────────────────

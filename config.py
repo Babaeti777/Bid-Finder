@@ -17,6 +17,22 @@ Changes from v1:
 import os
 import json
 
+# ─── Credential Keys Metadata ────────────────────────────────────────────
+CREDENTIAL_KEYS = {
+    "SAM_GOV_API_KEY": {"label": "SAM.gov API Key", "type": "api_key", "required_for": ["sam_gov"]},
+    "PLANHUB_EMAIL": {"label": "PlanHub Email", "type": "email", "required_for": ["planhub"]},
+    "PLANHUB_PASSWORD": {"label": "PlanHub Password", "type": "password", "required_for": ["planhub"]},
+    "BIDNET_EMAIL": {"label": "BidNet Email", "type": "email", "required_for": ["bidnet"]},
+    "BIDNET_PASSWORD": {"label": "BidNet Password", "type": "password", "required_for": ["bidnet"]},
+    "OPENGOV_EMAIL": {"label": "OpenGov Email", "type": "email", "required_for": ["opengov"]},
+    "OPENGOV_PASSWORD": {"label": "OpenGov Password", "type": "password", "required_for": ["opengov"]},
+    "GMAIL_ADDRESS": {"label": "Gmail Address", "type": "email", "required_for": []},
+    "GMAIL_APP_PASSWORD": {"label": "Gmail App Password", "type": "password", "required_for": []},
+    "EMAIL_RECIPIENTS": {"label": "Email Recipients (comma-separated)", "type": "text", "required_for": []},
+    "APP_PASSWORD": {"label": "Dashboard Password", "type": "password", "required_for": []},
+    "API_TRIGGER_KEY": {"label": "API Trigger Key", "type": "api_key", "required_for": []},
+}
+
 # ─── Company Profile ────────────────────────────────────────────────
 COMPANY = {
     "name": "OAK Builders LLC",
@@ -266,12 +282,21 @@ SOURCES = {
         "tier": 2,
         "notes": "Maryland state procurement",
     },
+    "vdot": {
+        "enabled": True,
+        "name": "Virginia DOT",
+        "url": "https://cabb.virginiadot.org",
+        "type": "html",
+        "auth": None,
+        "tier": 2,
+        "notes": "Transportation/civil projects",
+    },
 
     # === TIER 3: County/City portals (NOVA) ===
     "arlington_county": {
         "enabled": True,
         "name": "Arlington County",
-        "url": "https://procurement.arlingtonva.us",
+        "url": "https://www.arlingtonva.us/Government/Programs/Budget-Finance/Purchasing",
         "type": "html",
         "auth": None,
         "tier": 3,
@@ -279,10 +304,19 @@ SOURCES = {
     "fairfax_county": {
         "enabled": True,
         "name": "Fairfax County",
-        "url": "https://www.fairfaxcounty.gov/cregister/",
+        "url": "https://fairfaxcounty.bonfirehub.com/portal/?tab=openOpportunities",
         "type": "html",
         "auth": None,
         "tier": 3,
+    },
+    "fairfax_bonfire": {
+        "enabled": True,
+        "name": "Fairfax County (Bonfire)",
+        "url": "https://fairfaxcounty.bonfirehub.com/portal/?tab=openOpportunities",
+        "type": "html",
+        "auth": None,
+        "tier": 3,
+        "notes": "Fairfax uses Bonfire for procurement",
     },
     "loudoun_county": {
         "enabled": True,
@@ -295,7 +329,7 @@ SOURCES = {
     "prince_william_county": {
         "enabled": True,
         "name": "Prince William County",
-        "url": "https://www.pwcva.gov/department/finance/procurement",
+        "url": "https://eservice2.pwcgov.org/eservices/procurement/",
         "type": "html",
         "auth": None,
         "tier": 3,
@@ -492,6 +526,17 @@ def load_settings_override():
     """Load settings.json if it exists to override env vars."""
     try:
         with open("settings.json") as f:
-            return json.load(f)
+            settings = json.load(f)
+        # Set credentials as environment variables
+        creds = settings.get("credentials", {})
+        for key, value in creds.items():
+            if value:
+                os.environ[key] = value
+        # Override source enabled/disabled
+        source_overrides = settings.get("sources", {})
+        for source_key, enabled in source_overrides.items():
+            if source_key in SOURCES:
+                SOURCES[source_key]["enabled"] = enabled
+        return settings
     except (FileNotFoundError, json.JSONDecodeError):
         return {}

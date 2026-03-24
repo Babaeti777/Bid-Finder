@@ -26,10 +26,13 @@ from difflib import SequenceMatcher
 from config import (
     SOURCES, MIN_RELEVANCE_SCORE, DATABASE_FILE,
     SCRAPER_TIMEOUT, RETRY_ATTEMPTS, RETRY_BACKOFF,
-    EMAIL, SHEETS,
+    EMAIL, SHEETS, load_settings_override,
 )
 from models import BidOpportunity, BidDatabase
 from scorer import score_opportunities, RelevanceScorer
+
+# Load credentials from settings.json (if exists) before doing anything
+load_settings_override()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,7 +49,8 @@ def get_scraper(source_key: str):
         SamGovScraper, DcOcpScraper, MontgomeryCountyScraper,
         EvaScraper, CountyScraper, BidNetScraper,
         OpenGovScraper, PermitScraper, PlanHubScraper,
-        EmmaScraper,
+        EmmaScraper, VdotScraper, BonfireScraper,
+        PrinceWilliamScraper,
     )
 
     SCRAPER_MAP = {
@@ -55,10 +59,12 @@ def get_scraper(source_key: str):
         "montgomery_county": MontgomeryCountyScraper,
         "eva_virginia": EvaScraper,
         "emma_maryland": EmmaScraper,
+        "vdot": VdotScraper,
         "arlington_county": lambda: CountyScraper("arlington_county"),
         "fairfax_county": lambda: CountyScraper("fairfax_county"),
+        "fairfax_bonfire": BonfireScraper,
         "loudoun_county": lambda: CountyScraper("loudoun_county"),
-        "prince_william_county": lambda: CountyScraper("prince_william_county"),
+        "prince_william_county": PrinceWilliamScraper,
         "alexandria_city": lambda: CountyScraper("alexandria_city"),
         "fairfax_city": lambda: CountyScraper("fairfax_city"),
         "prince_georges_county": lambda: CountyScraper("prince_georges_county"),
