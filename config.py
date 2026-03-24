@@ -523,20 +523,62 @@ DATABASE_FILE = "bids.db"
 
 # ─── Settings override from file ─────────────────────────────────────
 def load_settings_override():
-    """Load settings.json if it exists to override env vars."""
+    """Load settings.json if it exists to override env vars.
+
+    Settings are stored as flat keys by the dashboard settings page:
+      {"sam_gov_api_key": "xxx", "planhub_email": "xxx", ...}
+    We map them to the environment variable names the scrapers expect.
+    """
     try:
         with open("settings.json") as f:
             settings = json.load(f)
-        # Set credentials as environment variables
+
+        # Map flat setting keys -> environment variable names
+        KEY_TO_ENV = {
+            "sam_gov_api_key": "SAM_GOV_API_KEY",
+            "planhub_email": "PLANHUB_EMAIL",
+            "planhub_password": "PLANHUB_PASSWORD",
+            "bidnet_email": "BIDNET_EMAIL",
+            "bidnet_password": "BIDNET_PASSWORD",
+            "opengov_email": "OPENGOV_EMAIL",
+            "opengov_password": "OPENGOV_PASSWORD",
+            "gmail_address": "GMAIL_ADDRESS",
+            "gmail_app_password": "GMAIL_APP_PASSWORD",
+            "email_recipients": "EMAIL_RECIPIENTS",
+            "app_password": "APP_PASSWORD",
+            "api_trigger_key": "API_TRIGGER_KEY",
+        }
+
+        for setting_key, env_var in KEY_TO_ENV.items():
+            value = settings.get(setting_key, "")
+            if value:
+                os.environ[env_var] = value
+
+        # Also support legacy nested "credentials" dict (backward compat)
         creds = settings.get("credentials", {})
         for key, value in creds.items():
             if value:
                 os.environ[key] = value
+
         # Override source enabled/disabled
         source_overrides = settings.get("sources", {})
-        for source_key, enabled in source_overrides.items():
+        for source_key, source_settings in source_overrides.items():
+            # source_overrides can be {"source_name": {"enabled": True/False}}
+            # or {"source_key": True/False}
+            if isinstance(source_settings, dict):
+                enabled = source_settings.get("enabled", True)
+            else:
+                enabled = bool(source_settings)
+            # Match by source key or by source name
             if source_key in SOURCES:
                 SOURCES[source_key]["enabled"] = enabled
+            else:
+                # Try matching by name
+                for sk, cfg in SOURCES.items():
+                    if cfg.get("name") == source_key:
+                        cfg["enabled"] = enabled
+                        break
+
         return settings
     except (FileNotFoundError, json.JSONDecodeError):
         return {}

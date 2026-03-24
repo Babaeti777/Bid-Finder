@@ -149,23 +149,44 @@ def get_source_status():
     settings = get_settings()
     source_config = settings.get("sources", {})
 
+    # Map of source keys to the credential env vars they need
+    SOURCE_CREDS = {
+        "sam_gov": ["sam_gov_api_key"],
+        "planhub": ["planhub_email", "planhub_password"],
+        "bidnet": ["bidnet_email", "bidnet_password"],
+        "opengov": ["opengov_email", "opengov_password"],
+    }
+
     status = []
-    for source in SOURCES:
-        source_name = source.get("name", "Unknown")
-        enabled = source_config.get(source_name, {}).get("enabled", True)
+    for source_key, source_cfg in SOURCES.items():
+        source_name = source_cfg.get("name", source_key)
+
+        # Check if disabled via settings (match by key or name)
+        enabled = source_cfg.get("enabled", True)
+        if source_name in source_config:
+            src_settings = source_config[source_name]
+            if isinstance(src_settings, dict):
+                enabled = src_settings.get("enabled", enabled)
+            else:
+                enabled = bool(src_settings)
+        if source_key in source_config:
+            src_settings = source_config[source_key]
+            if isinstance(src_settings, dict):
+                enabled = src_settings.get("enabled", enabled)
+            else:
+                enabled = bool(src_settings)
 
         # Check if required credentials are configured
-        required_creds = source.get("required_credentials", [])
-        has_auth = all(
-            settings.get(cred.lower().replace("_", "_"))
-            for cred in required_creds
-        ) if required_creds else True
+        required_creds = SOURCE_CREDS.get(source_key, [])
+        has_auth = all(settings.get(cred) for cred in required_creds) if required_creds else True
 
         status.append({
+            "key": source_key,
             "name": source_name,
             "enabled": enabled,
             "has_auth": has_auth,
             "required_credentials": required_creds,
+            "tier": source_cfg.get("tier", 9),
         })
 
     return status
@@ -224,9 +245,9 @@ def settings():
         if "sources" not in settings_data:
             settings_data["sources"] = {}
 
-        for source in SOURCES:
-            source_name = source.get("name", "Unknown")
-            enabled = request.form.get(f"source_{source_name}_enabled") == "on"
+        for source_key, source_cfg in SOURCES.items():
+            source_name = source_cfg.get("name", source_key)
+            enabled = request.form.get(f"source_{source_key}_enabled") == "on"
             if source_name not in settings_data["sources"]:
                 settings_data["sources"][source_name] = {}
             settings_data["sources"][source_name]["enabled"] = enabled
@@ -519,9 +540,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <option value="no_bid">No Bid</option>
   </select>
   <select id="filterScore" onchange="loadBids()">
-    <option value="0">Any Score</option>
+    <option value="0" selected>Any Score</option>
+    <option value="25">25+</option>
     <option value="50">50+</option>
-    <option value="70" selected>70+</option>
+    <option value="70">70+</option>
     <option value="80">80+ (Don't Miss)</option>
   </select>
   <input type="search" id="filterKeyword" placeholder="Search keywords..." onkeyup="debounceSearch()">
@@ -820,7 +842,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       <div class="source-list">
         {% for source in source_status %}
         <div class="source-item">
-          <input type="checkbox" id="source_{{ source.name }}_enabled" name="source_{{ source.name }}_enabled" {% if source.enabled %}checked{% endif %}>
+          <input type="checkbox" id="source_{{ source.key }}_enabled" name="source_{{ source.key }}_enabled" {% if source.enabled %}checked{% endif %}>
           <div class="source-info">
             <div class="name">
               {{ source.name }}

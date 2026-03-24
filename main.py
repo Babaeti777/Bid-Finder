@@ -226,7 +226,7 @@ def run_scrapers(source_filter: str = None, progress_callback=None):
 
     # 2. Filter by minimum relevance
     qualified = [o for o in all_opportunities if o.relevance_score >= MIN_RELEVANCE_SCORE]
-    logger.info(f"After relevance filter (>={MIN_RELEVANCE_SCORE}): {qualified}")
+    logger.info(f"After relevance filter (>={MIN_RELEVANCE_SCORE}): {len(qualified)}")
 
     # 3. Remove expired
     active = [o for o in qualified if not o.is_expired]
@@ -252,8 +252,6 @@ def run_scrapers(source_filter: str = None, progress_callback=None):
 
     # 7. Log the run
     run_duration = time.time() - run_start
-    with db._init_db.__func__(db) if False else open(os.devnull, 'w'):
-        pass  # Just need the db connection
     import sqlite3
     with sqlite3.connect(DATABASE_FILE) as conn:
         conn.execute(
