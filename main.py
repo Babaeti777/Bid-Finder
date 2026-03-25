@@ -15,6 +15,7 @@ Changes from v1:
 """
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import logging
@@ -49,7 +50,7 @@ def get_scraper(source_key: str):
         SamGovScraper, DcOcpScraper, MontgomeryCountyScraper,
         EvaScraper, CountyScraper, BidNetScraper,
         OpenGovScraper, PermitScraper, PlanHubScraper,
-        EmmaScraper, VdotScraper, BonfireScraper,
+        EmmaScraper, VdotScraper,
         PrinceWilliamScraper,
     )
 
@@ -62,7 +63,6 @@ def get_scraper(source_key: str):
         "vdot": VdotScraper,
         "arlington_county": lambda: CountyScraper("arlington_county"),
         "fairfax_county": lambda: CountyScraper("fairfax_county"),
-        "fairfax_bonfire": BonfireScraper,
         "loudoun_county": lambda: CountyScraper("loudoun_county"),
         "prince_william_county": PrinceWilliamScraper,
         "alexandria_city": lambda: CountyScraper("alexandria_city"),
@@ -173,7 +173,16 @@ def run_scrapers(source_filter: str = None, progress_callback=None):
         # Retry loop
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
-                results = scraper.scrape()
+                # Wrap scraper in timeout (2 minutes per scraper)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(scraper.scrape)
+                    try:
+                        results = future.result(timeout=120)  # 2 minute max per scraper
+                    except concurrent.futures.TimeoutError:
+                        logger.error(f"  -> {source_name}: TIMED OUT after 120s")
+                        errors.append({"source": source_name, "error": "Timed out after 120s", "type": "timeout"})
+                        break  # Don't retry timeouts
+
                 found_count = len(results)
 
                 # Tag source quality tier
@@ -185,6 +194,9 @@ def run_scrapers(source_filter: str = None, progress_callback=None):
                 logger.info(f"  -> {source_name}: {found_count} opportunities")
                 break
 
+            except concurrent.futures.TimeoutError:
+                # Already handled above
+                break
             except Exception as e:
                 source_errors += 1
                 if is_permanent_failure(e):

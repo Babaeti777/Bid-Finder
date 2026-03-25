@@ -56,6 +56,8 @@ class BaseScraper(ABC):
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": get_ua()})
+        # Disable browser fallback in cloud environments (Render, etc.)
+        self.use_browser = os.environ.get("ENABLE_BROWSER", "").lower() == "true"
 
     @abstractmethod
     def scrape(self) -> List[BidOpportunity]:
@@ -79,7 +81,15 @@ class BaseScraper(ABC):
         return BeautifulSoup(resp.text, "lxml")
 
     def _browser_fetch(self, url: str, wait_for: str = None) -> Optional[BeautifulSoup]:
-        """Fallback to headless browser if available."""
+        """Fallback to headless browser if available.
+
+        Note: Browser is disabled in cloud deployments (Render, etc.) to avoid
+        60s timeouts. Set ENABLE_BROWSER=true to re-enable.
+        """
+        if not self.use_browser:
+            logger.debug("Browser fallback disabled (cloud environment)")
+            return None
+
         try:
             from browser import browser_fetch, is_browser_available
             if not is_browser_available():
@@ -479,13 +489,7 @@ class EvaScraper(BaseScraper):
             ]
 
             if not sol_links:
-                # Try browser fallback
-                soup = self._browser_fetch(
-                    f"{self.BASE_URL}/pages/eva-public-portal.htm",
-                    wait_for="table"
-                )
-                if soup:
-                    sol_links = soup.find_all("a", href=True)
+                logger.warning("eVA: no solicitations found via requests, skipping browser fallback")
 
             for link in sol_links[:200]:
                 bid = self._parse_listing(link, soup)
@@ -493,8 +497,8 @@ class EvaScraper(BaseScraper):
                     results.append(bid)
 
         except Exception as e:
-            logger.error(f"eVA error: {e}")
-            raise
+            logger.warning(f"eVA error (non-fatal): {e}")
+            # Don't raise; just return empty
 
         return results
 
@@ -542,39 +546,23 @@ class EmmaScraper(BaseScraper):
     def scrape(self) -> List[BidOpportunity]:
         results = []
         try:
-            search_url = f"{self.BASE_URL}/page"
-            soup = self._fetch_html(search_url)
-
-            # eMMA typically renders via JS, so try browser fallback
-            if not soup.find_all("table"):
-                soup = self._browser_fetch(search_url, wait_for="table")
+            # Try public browse page first
+            alt_url = "https://emma.maryland.gov/page.aspx/en/rfp/request_browse_public"
+            soup = self._fetch_html(alt_url)
 
             if soup:
                 rows = soup.find_all("tr")
-                for row in rows[1:200]:  # Skip header, increased limit
+                for row in rows[1:200]:
                     bid = self._parse_row(row)
                     if bid:
                         results.append(bid)
 
-            # Alternative: try public browse page
             if not results:
-                alt_url = "https://emma.maryland.gov/page.aspx/en/rfp/request_browse_public"
-                try:
-                    soup = self._fetch_html(alt_url)
-                    if not soup.find_all("table"):
-                        soup = self._browser_fetch(alt_url, wait_for="table")
-                    if soup:
-                        rows = soup.find_all("tr")
-                        for row in rows[1:200]:
-                            bid = self._parse_row(row)
-                            if bid:
-                                results.append(bid)
-                except Exception as e:
-                    logger.warning(f"eMMA alternative URL failed: {e}")
+                logger.warning("eMMA: no results found, skipping browser fallback")
 
         except Exception as e:
-            logger.error(f"eMMA Maryland error: {e}")
-            raise
+            logger.warning(f"eMMA Maryland error (non-fatal): {e}")
+            # Don't raise; just return empty
 
         return results
 
@@ -792,18 +780,6 @@ class CountyScraper(BaseScraper):
                                 keyword_matches=self._extract_keywords(text),
                             ))
 
-                # Strategy 4: Browser fallback for JS-rendered sites
-                if not results:
-                    soup = self._browser_fetch(url, wait_for="table")
-                    if soup:
-                        tables = soup.find_all("table")
-                        for table in tables:
-                            rows = table.find_all("tr")
-                            for row in rows[1:]:
-                                bid = self._parse_table_row(row)
-                                if bid:
-                                    results.append(bid)
-
                 if results:
                     break  # Stop if we found results
 
@@ -977,8 +953,6 @@ class OpenGovScraper(BaseScraper):
             for portal_url in embed_urls:
                 try:
                     soup = self._fetch_html(portal_url)
-                    if not soup.find("table"):
-                        soup = self._browser_fetch(portal_url, wait_for="table")
 
                     if soup:
                         rows = soup.find_all("tr")
@@ -993,8 +967,7 @@ class OpenGovScraper(BaseScraper):
                 time.sleep(1)
 
         except Exception as e:
-            logger.error(f"OpenGov error: {e}")
-            raise
+            logger.warning(f"OpenGov error (non-fatal): {e}")
 
         return results
 
@@ -1045,8 +1018,6 @@ class VdotScraper(BaseScraper):
         try:
             soup = self._fetch_html(self.BASE_URL)
             # Look for advertisement tables
-            if not soup.find("table"):
-                soup = self._browser_fetch(self.BASE_URL, wait_for="table")
             if soup:
                 for table in soup.find_all("table"):
                     for row in table.find_all("tr")[1:]:
@@ -1054,8 +1025,7 @@ class VdotScraper(BaseScraper):
                         if bid:
                             results.append(bid)
         except Exception as e:
-            logger.error(f"VDOT error: {e}")
-            raise
+            logger.warning(f"VDOT error (non-fatal): {e}")
         return results
 
     def _parse_row(self, row) -> Optional[BidOpportunity]:
@@ -1101,9 +1071,7 @@ class BonfireScraper(BaseScraper):
         results = []
         for key, portal in self.PORTALS.items():
             try:
-                soup = self._browser_fetch(portal["url"], wait_for="table")
-                if not soup:
-                    soup = self._fetch_html(portal["url"])
+                soup = self._fetch_html(portal["url"])
                 if soup:
                     for row in soup.find_all("tr")[1:]:
                         bid = self._parse_row(row, portal)
@@ -1111,7 +1079,7 @@ class BonfireScraper(BaseScraper):
                             results.append(bid)
                 time.sleep(1)
             except Exception as e:
-                logger.warning(f"Bonfire {key} error: {e}")
+                logger.warning(f"Bonfire {key} error (non-fatal): {e}")
         return results
 
     def _parse_row(self, row, portal) -> Optional[BidOpportunity]:
@@ -1150,8 +1118,6 @@ class PrinceWilliamScraper(BaseScraper):
         results = []
         try:
             soup = self._fetch_html(self.BASE_URL)
-            if not soup.find("table"):
-                soup = self._browser_fetch(self.BASE_URL, wait_for="table")
             if soup:
                 for table in soup.find_all("table"):
                     for row in table.find_all("tr")[1:]:
@@ -1180,8 +1146,7 @@ class PrinceWilliamScraper(BaseScraper):
                             keyword_matches=self._extract_keywords(title),
                         ))
         except Exception as e:
-            logger.error(f"Prince William County error: {e}")
-            raise
+            logger.warning(f"Prince William County error (non-fatal): {e}")
         return results
 
 
@@ -1210,17 +1175,8 @@ class PermitScraper(BaseScraper):
                     if bid:
                         results.append(bid)
 
-            if not results:
-                soup = self._browser_fetch(self.base_url, wait_for="table")
-                if soup:
-                    for table in soup.find_all("table"):
-                        for row in table.find_all("tr")[1:30]:
-                            bid = self._parse_permit(row)
-                            if bid:
-                                results.append(bid)
-
         except Exception as e:
-            logger.warning(f"{self.source_name} permit scraper: {e}")
+            logger.warning(f"{self.source_name} permit scraper (non-fatal): {e}")
 
         return results
 

@@ -55,6 +55,14 @@ def load_settings():
                 os.environ["OPENGOV_EMAIL"] = settings["opengov_email"]
             if "opengov_password" in settings:
                 os.environ["OPENGOV_PASSWORD"] = settings["opengov_password"]
+            if "eva_email" in settings:
+                os.environ["EVA_EMAIL"] = settings["eva_email"]
+            if "eva_password" in settings:
+                os.environ["EVA_PASSWORD"] = settings["eva_password"]
+            if "emma_email" in settings:
+                os.environ["EMMA_EMAIL"] = settings["emma_email"]
+            if "emma_password" in settings:
+                os.environ["EMMA_PASSWORD"] = settings["emma_password"]
             if "gmail_address" in settings:
                 os.environ["GMAIL_ADDRESS"] = settings["gmail_address"]
             if "gmail_app_password" in settings:
@@ -155,6 +163,8 @@ def get_source_status():
         "planhub": ["planhub_email", "planhub_password"],
         "bidnet": ["bidnet_email", "bidnet_password"],
         "opengov": ["opengov_email", "opengov_password"],
+        "eva_virginia": ["eva_email", "eva_password"],
+        "emma_maryland": ["emma_email", "emma_password"],
     }
 
     status = []
@@ -230,6 +240,14 @@ def settings():
             settings_data["opengov_email"] = request.form.get("opengov_email")
         if request.form.get("opengov_password"):
             settings_data["opengov_password"] = request.form.get("opengov_password")
+        if request.form.get("eva_email"):
+            settings_data["eva_email"] = request.form.get("eva_email")
+        if request.form.get("eva_password"):
+            settings_data["eva_password"] = request.form.get("eva_password")
+        if request.form.get("emma_email"):
+            settings_data["emma_email"] = request.form.get("emma_email")
+        if request.form.get("emma_password"):
+            settings_data["emma_password"] = request.form.get("emma_password")
         if request.form.get("gmail_address"):
             settings_data["gmail_address"] = request.form.get("gmail_address")
         if request.form.get("gmail_app_password"):
@@ -281,6 +299,10 @@ def api_settings():
         "bidnet_password": bool(current_settings.get("bidnet_password")),
         "opengov_email": bool(current_settings.get("opengov_email")),
         "opengov_password": bool(current_settings.get("opengov_password")),
+        "eva_email": bool(current_settings.get("eva_email")),
+        "eva_password": bool(current_settings.get("eva_password")),
+        "emma_email": bool(current_settings.get("emma_email")),
+        "emma_password": bool(current_settings.get("emma_password")),
         "gmail_address": bool(current_settings.get("gmail_address")),
         "gmail_app_password": bool(current_settings.get("gmail_app_password")),
         "email_recipients": bool(current_settings.get("email_recipients")),
@@ -793,6 +815,40 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         <label for="opengov_password">Password</label>
         <input type="password" id="opengov_password" name="opengov_password" value="{{ current_settings.get('opengov_password', '') }}" placeholder="Enter password">
         <div class="hint">{% if current_settings.get('opengov_password') %}Currently set (showing last 4 chars: {{ mask_value(current_settings.get('opengov_password')) }}){% endif %}</div>
+      </div>
+    </div>
+
+    <!-- eVA Section -->
+    <div class="section">
+      <h2>eVA Virginia Credentials</h2>
+
+      <div class="form-group">
+        <label for="eva_email">Email</label>
+        <input type="email" id="eva_email" name="eva_email" value="{{ current_settings.get('eva_email', '') }}" placeholder="your@email.com">
+        <div class="hint">Virginia eVA public portal (optional credentials for authenticated access)</div>
+      </div>
+
+      <div class="form-group">
+        <label for="eva_password">Password</label>
+        <input type="password" id="eva_password" name="eva_password" value="{{ current_settings.get('eva_password', '') }}" placeholder="Enter password">
+        <div class="hint">{% if current_settings.get('eva_password') %}Currently set (showing last 4 chars: {{ mask_value(current_settings.get('eva_password')) }}){% endif %}</div>
+      </div>
+    </div>
+
+    <!-- eMMA Section -->
+    <div class="section">
+      <h2>eMMA Maryland Credentials</h2>
+
+      <div class="form-group">
+        <label for="emma_email">Email</label>
+        <input type="email" id="emma_email" name="emma_email" value="{{ current_settings.get('emma_email', '') }}" placeholder="your@email.com">
+        <div class="hint">Maryland eMMA procurement portal (optional credentials for authenticated access)</div>
+      </div>
+
+      <div class="form-group">
+        <label for="emma_password">Password</label>
+        <input type="password" id="emma_password" name="emma_password" value="{{ current_settings.get('emma_password', '') }}" placeholder="Enter password">
+        <div class="hint">{% if current_settings.get('emma_password') %}Currently set (showing last 4 chars: {{ mask_value(current_settings.get('emma_password')) }}){% endif %}</div>
       </div>
     </div>
 
